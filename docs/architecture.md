@@ -5,10 +5,10 @@
 | [`database.md`](database.md) | SQLite: таблицы, репозитории, миграции Alembic и как бот этим пользуется |
 | [`fetch_modules.md`](fetch_modules.md) | Клиент `OnlineContract`: процедуры и позиции с публичного API `api.onlc.ru` |
 | [`misc.md`](misc.md) | Окружение: `TOKEN`, `DATABASE_URL`, `ADMIN_IDS` и загрузка корневого `.env` |
-| [`utils.md`](utils.md) | Текст карточек для Telegram, кнопки категорий и разбор `callback_data` |
+| [`utils.md`](utils.md) | Текст карточек для Telegram, кнопки категорий и разбор `callback_data` (`tgbot/ui`) |
 | [`testing.md`](testing.md) | Запуск pytest и короткая ручная проверка в Telegram |
 
-Черновики в `docs/research/` лежат только локально и в документацию продукта не входят.
+Прайс-лист читается из `data/` или из `PRICE_LIST_PATH`. Каталог `docs/research/` — устаревший локальный запасной путь и в git не входит.
 
 Достоверное описание потоков и границ компонентов. Детали реализации — в исходниках и в профильных файлах [`docs/`](.).
 
@@ -22,23 +22,26 @@ Telegram-бот на **aiogram 3.x** запрашивает у публично�
 |----------|-------------------|
 | [Telegram Bot API](https://core.telegram.org/bots/api) | Лимиты сообщений (4096 символов), callback_data (до 64 байт), flood control, `deleteMessage` (не старше 48 часов), `my_chat_member`, `setMyCommands` |
 | [aiogram 3.x](https://docs.aiogram.dev/en/latest/) | Обработчики, `Bot`, `Dispatcher`, middleware, HTML parse mode, scope команд |
-| Код [`fetch_modules/online_trade.py`](../fetch_modules/online_trade.py) | Фактические URL и query к `api.onlc.ru` (публичная спецификация площадки в репозитории не хранится) |
+| Код [`onlinecontract/client.py`](../onlinecontract/client.py) | Фактические URL и query к `api.onlc.ru` (публичная спецификация площадки в репозитории не хранится) |
 
 ## Структура репозитория (логические слои)
 
 ```text
-bot.py              — точка входа, middleware сессии и доступа, команды /start, /help, /clear и callback процедур
-bot_admin.py        — команды владельца: сводка, список, карточка, бан, разбан, сброс диалога, удаление профиля
-backups.py          — снимок файла SQLite владельцам, когда вышел срок и база изменилась
-intersection_feed.py — раз в 15 минут ищет конкурсные листы и постит пересечения с прайсом: «подходит» тем, кто нажал /start и не закрыт, плюс id из ADMIN_IDS; «пограничный» только владельцам
-matching/            — сопоставление с прайсом: категории видов товара, эмбеддинги, уровень «подходит» / «пограничный»
-access.py           — запрет «доступ закрыт» для людей с закрытым доступом
-dialogs.py          — сброс диалога: треки сообщений, deleteMessage, снятие закрепа
-db/                 — персистентный слой (подробно — database.md)
-alembic/            — миграции схемы
-fetch_modules/      — синхронный HTTP-клиент к API (вызов из asyncio через to_thread)
-misc/               — TOKEN (TgKeys), загрузка .env (load_env.py), DATABASE_URL (db_url.py), ADMIN_IDS (admins.py)
-utils/              — форматирование текста для Telegram, категории кнопок, разбор callback
+bot.py                 — запуск: python bot.py вызывает tgbot.app.main
+tgbot/app.py           — Bot, Dispatcher, middleware, фоновые задачи
+tgbot/user.py          — /start, /help, /clear и callback процедур
+tgbot/admin.py         — команды владельца: сводка, список, карточка, бан, разбан, сброс диалога, удаление профиля
+tgbot/middleware.py    — сессия БД на update и запрет «доступ закрыт»
+tgbot/dialogs.py       — сброс диалога: треки сообщений, deleteMessage, снятие закрепа
+tgbot/ui/              — текст карточек, кнопки категорий, разбор callback
+jobs/backups.py        — снимок файла SQLite владельцам, когда вышел срок и база изменилась
+jobs/intersection_feed.py — раз в 15 минут ищет конкурсные листы и постит пересечения с прайсом: «подходит» тем, кто нажал /start и не закрыт, плюс id из ADMIN_IDS; «пограничный» только владельцам
+jobs/match_cards.py    — текст карточки пересечения и кнопки «Позиции», «Подходит», «Не подходит»
+matching/               — сопоставление с прайсом: категории видов товара, эмбеддинги, уровень «подходит» / «пограничный»
+db/                    — персистентный слой (подробно — database.md)
+alembic/               — миграции схемы
+onlinecontract/        — синхронный HTTP-клиент к API (вызов из asyncio через to_thread)
+misc/                  — TOKEN (TgKeys), загрузка .env (load_env.py), DATABASE_URL (db_url.py), ADMIN_IDS (admins.py)
 ```
 
 Персистентность (SQLite, SQLAlchemy async, Pydantic, Alembic, кэш и трекинг сообщений) описана в **[`database.md`](database.md)** — здесь не дублируется.
@@ -57,10 +60,10 @@ flowchart LR
 ```
 
 1. `/start` в личном чате записывает человека в журнал. Если доступ закрыт, бот отвечает «доступ закрыт» и меню категорий не показывает.
-2. Пользователь выбирает категорию → `callback_data` из [`utils/categories.py`](../utils/categories.py) → `_ensure_procedures` (кэш в БД или запрос) → `OnlineContract.get_procedures` (в `to_thread`).
-3. Карточки процедур рендерятся через `beautiful_procedure`; пагинация — callback вида `m|<offset>|<cat_str>` (см. [`bot.py`](../bot.py)).
+2. Пользователь выбирает категорию → `callback_data` из [`tgbot/ui/keyboards.py`](../tgbot/ui/keyboards.py) → `_ensure_procedures` (кэш в БД или запрос) → `OnlineContract.get_procedures` (в `to_thread`).
+3. Карточки процедур рендерятся через `beautiful_procedure`; пагинация — callback вида `m|<offset>|<cat_str>` (см. [`tgbot/user.py`](../tgbot/user.py)).
 4. «Позиции» → `pos_<id>` → `get_positions` → `beautiful_positions`; длинный текст режется через `split_telegram_messages`.
-5. `/help` отвечает текстом-справкой; владельцу в личном чате к нему добавляются команды из `bot_admin.py`. `/clear` пытается удалить до 30 последних сообщений чата и саму команду. Журнал `bot_message_tracks` эта команда не использует.
+5. `/help` отвечает текстом-справкой; владельцу в личном чате к нему добавляются команды из `tgbot/admin.py`. `/clear` пытается удалить до 30 последних сообщений чата и саму команду. Журнал `bot_message_tracks` эта команда не использует.
 
 ## Пользователи и доступ
 
@@ -79,7 +82,7 @@ flowchart LR
 
 ## Согласованность данных
 
-- Кнопки категорий: кортеж **`onlc_text_and_data`** и множество **`CATEGORY_CALLBACK_IDS`** в [`bot.py`](../bot.py) должны совпадать по вторым элементам (строка id для API).
+- Кнопки категорий: кортеж **`onlc_text_and_data`** и множество **`CATEGORY_CALLBACK_IDS`** в [`tgbot/user.py`](../tgbot/user.py) должны совпадать по вторым элементам (строка id для API).
 
 ## Пакеты (углублённо)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -10,9 +11,9 @@ from pathlib import Path
 
 import xlrd
 
+from matching import config
 from matching.attributes import normalize
 from matching.categories import OTHER, category_of
-from matching.config import RESEARCH_DIR
 
 _BOILER = (
     "не является публичной",
@@ -58,18 +59,45 @@ class Sku:
     category: str
 
 
+def _pick_xls(directory: Path) -> Path | None:
+    """Largest ``.xls`` in ``directory``. A name containing ``ОПТ`` wins over other files."""
+    if not directory.is_dir():
+        return None
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return None
+    files = [path for path in entries if path.is_file() and path.suffix.lower() == ".xls"]
+    preferred = [path for path in files if "ОПТ" in path.name.upper()]
+    chosen = preferred or files
+    if not chosen:
+        return None
+    chosen.sort(key=lambda path: path.stat().st_size, reverse=True)
+    return chosen[0]
+
+
 def find_price_xls() -> str:
-    candidates = [
-        path
-        for path in RESEARCH_DIR.iterdir()
-        if path.suffix.lower() == ".xls" and "ОПТ" in path.name.upper()
-    ]
-    if not candidates:
-        candidates = [path for path in RESEARCH_DIR.iterdir() if path.suffix.lower() == ".xls"]
-    if not candidates:
-        raise FileNotFoundError(f"price list xls not found under {RESEARCH_DIR}")
-    candidates.sort(key=lambda path: path.stat().st_size, reverse=True)
-    return str(candidates[0])
+    """Resolve the price list.
+
+    ``PRICE_LIST_PATH`` (absolute or relative to the repository) wins. Otherwise
+    the largest ``.xls`` in ``data/``, preferring a name that contains ``ОПТ``.
+    ``docs/research`` is only a legacy fallback for an existing checkout.
+    """
+    raw = os.environ.get("PRICE_LIST_PATH", "").strip()
+    if raw:
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = config.REPO_ROOT / path
+        if not path.is_file():
+            raise FileNotFoundError(f"PRICE_LIST_PATH is set but the file is missing: {path}")
+        return str(path)
+    for directory in (config.DATA_DIR, config.RESEARCH_DIR):
+        found = _pick_xls(directory)
+        if found is not None:
+            return str(found)
+    raise FileNotFoundError(
+        "price list xls not found; set PRICE_LIST_PATH or put the file in data/"
+    )
 
 
 def price_fingerprint(path: str | Path) -> str:

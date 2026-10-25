@@ -2,7 +2,7 @@
 
 import pytest
 
-from utils.callbacks import (
+from tgbot.ui.callbacks import (
     parse_delete_user_callback,
     parse_match_feedback,
     parse_pagination_callback,

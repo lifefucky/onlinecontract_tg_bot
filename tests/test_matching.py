@@ -12,7 +12,7 @@ from sqlalchemy import select
 from db.models.match_label import MatchLabel
 from db.repositories import labels
 from db.session import bind_engine, create_async_engine_from_url, get_session_maker, init_db_schema, reset_engine
-from intersection_feed import select_procedures_to_match, should_rematch_all
+from jobs.intersection_feed import select_procedures_to_match, should_rematch_all
 from matching.catalog import price_file_day, price_fingerprint, skus_from_rows, stale_price_warning
 from matching.categories import category_of
 from matching.config import EMBED_BATCH, FIT_MIN_COSINE, PRICE_MAX_AGE_DAYS
@@ -133,6 +133,28 @@ def test_stale_position_ids_use_mtime(tmp_path, monkeypatch):
     os.utime(old, (now - 90_000, now - 90_000))
     assert tenders.stale_position_ids([1, 2, 3], max_age_seconds=86_400, now=now) == [2, 3]
     assert stale_position_ids([1], max_age_seconds=86_400, now=now) == []
+
+
+def test_position_files_are_read_from_legacy_cache_without_copying(tmp_path, monkeypatch):
+    import matching.tenders as tenders
+
+    package = tmp_path / "matching"
+    research = tmp_path / "research"
+    legacy = research / "pipeline" / "cache" / "positions"
+    legacy.mkdir(parents=True)
+    (legacy / "9.json").write_text(
+        json.dumps({"data": [{"name": "Мыло", "totalCount": 1, "unit": "шт"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(tenders, "CACHE_DIR", package / "cache")
+    monkeypatch.setattr(tenders, "PACKAGE_DIR", package)
+    monkeypatch.setattr(tenders, "RESEARCH_DIR", research)
+    loaded, _terms = tenders.fetch_positions([9])
+    assert loaded[9][0]["name"] == "Мыло"
+    assert not (package / "cache" / "positions" / "9.json").exists()
+
+    monkeypatch.setattr(tenders, "RESEARCH_DIR", tmp_path / "missing-research")
+    assert tenders.stale_position_ids([9], max_age_seconds=10, now=0) == [9]
 
 
 def _index(skus, vectors) -> CatalogIndex:
@@ -295,6 +317,89 @@ def test_embedder_reuses_cache_without_a_client(tmp_path, monkeypatch):
     np.testing.assert_allclose(found["Перчатки х/б"], vector)
     embed_catalog(embedder, ["Перчатки х/б"], allow_large=False)
     assert embedder.api_calls == 0
+
+
+def test_embedder_reads_legacy_cache_and_does_not_write_it(tmp_path, monkeypatch):
+    import matching.config as config
+    import matching.embeddings as embeddings
+
+    package = tmp_path / "matching"
+    research = tmp_path / "research"
+    legacy = research / "pipeline" / "cache"
+    legacy.mkdir(parents=True)
+    monkeypatch.setattr(config, "PACKAGE_DIR", package)
+    monkeypatch.setattr(config, "CACHE_DIR", package / "cache")
+    monkeypatch.setattr(config, "RESEARCH_DIR", research)
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "")
+    vector = _unit(1, 0, 0)
+    np.savez_compressed(legacy / "embeddings_bge_m3.npz", vectors=np.vstack([vector]))
+    (legacy / "embeddings_meta.json").write_text(
+        json.dumps({"model": config.EMBED_MODEL, "dim": 3, "texts": ["Перчатки х/б"]}),
+        encoding="utf-8",
+    )
+    embedder = embeddings.Embedder()
+    found = embedder.embed(["Перчатки х/б"])
+    assert embedder.api_calls == 0
+    np.testing.assert_allclose(found["Перчатки х/б"], vector)
+    assert not (package / "cache" / "embeddings_meta.json").exists()
+
+    monkeypatch.setattr(config, "RESEARCH_DIR", tmp_path / "missing-research")
+    (package / "cache").mkdir(parents=True)
+    (package / "cache" / "embeddings_meta.json").unlink(missing_ok=True)
+    assert config.embedding_read_dir() == package / "cache"
+
+
+def test_find_price_xls_resolution_order(tmp_path, monkeypatch):
+    import matching.catalog as catalog
+    import matching.config as config
+
+    data = tmp_path / "data"
+    research = tmp_path / "research"
+    data.mkdir()
+    research.mkdir()
+    monkeypatch.setattr(config, "DATA_DIR", data)
+    monkeypatch.setattr(config, "RESEARCH_DIR", research)
+    monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
+    monkeypatch.delenv("PRICE_LIST_PATH", raising=False)
+
+    (data / "ОПТ-small.xls").write_bytes(b"a")
+    (data / "other.xls").write_bytes(b"aaa")
+    assert Path(catalog.find_price_xls()).name == "ОПТ-small.xls"
+    (data / "ОПТ-small.xls").unlink()
+    (data / "ОПТ-large.xls").write_bytes(b"aaaa")
+    (data / "ОПТ-mid.xls").write_bytes(b"aa")
+    assert Path(catalog.find_price_xls()).name == "ОПТ-large.xls"
+    for path in data.glob("*.xls"):
+        path.unlink()
+    (data / "plain.xls").write_bytes(b"zz")
+    assert Path(catalog.find_price_xls()).name == "plain.xls"
+
+    for path in data.glob("*.xls"):
+        path.unlink()
+    legacy = research / "ОПТ-legacy.xls"
+    legacy.write_bytes(b"xx")
+    assert Path(catalog.find_price_xls()) == legacy
+
+    monkeypatch.setattr(config, "RESEARCH_DIR", tmp_path / "no-such-research")
+    (data / "kept.xls").write_bytes(b"q")
+    assert Path(catalog.find_price_xls()).name == "kept.xls"
+    (data / "kept.xls").unlink()
+
+    custom = tmp_path / "custom" / "price.xls"
+    custom.parent.mkdir()
+    custom.write_bytes(b"z")
+    monkeypatch.setenv("PRICE_LIST_PATH", "custom/price.xls")
+    assert Path(catalog.find_price_xls()) == custom
+    monkeypatch.setenv("PRICE_LIST_PATH", str(tmp_path / "missing.xls"))
+    with pytest.raises(FileNotFoundError, match="missing.xls"):
+        catalog.find_price_xls()
+
+    monkeypatch.delenv("PRICE_LIST_PATH")
+    with pytest.raises(FileNotFoundError, match="PRICE_LIST_PATH") as exc:
+        catalog.find_price_xls()
+    message = str(exc.value)
+    assert "data/" in message
+    assert "docs/research" not in message
 
 
 def test_score_owner_labels_does_not_move_the_threshold():

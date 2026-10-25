@@ -1,4 +1,4 @@
-# Пакет `utils`
+# Пакет `tgbot/ui`
 
 Вспомогательные функции **представления данных** для Telegram и **статическая конфигурация категорий** для inline-клавиатуры.
 
@@ -6,17 +6,17 @@
 
 | Файл | Роль |
 |------|------|
-| [`__init__.py`](../utils/__init__.py) | Собирает публичный API пакета: функции из **`beautiful_msg`**, **`onlc_text_and_data`** из **`categories`**. |
-| [`beautiful_msg.py`](../utils/beautiful_msg.py) | Форматирование карточек процедуры и конкурсного листа позиций; разбиение текста на части по лимиту Telegram. |
-| [`categories.py`](../utils/categories.py) | Кортеж **`onlc_text_and_data`**: подпись кнопки → **`callback_data`** (строка с id категорий API через запятую). |
-| [`callbacks.py`](../utils/callbacks.py) | Разбор **`m|<offset>|<cat_str>`** для кнопки «Показать ещё», **`au|<offset>`** для списка пользователей, **`adel` / `adelx`** для подтверждения удаления и **`mf|<id>|1|…` / `mf|<id>|0|…`** для «Подходит» / «Не подходит». |
+| [`__init__.py`](../tgbot/ui/__init__.py) | Собирает публичный API пакета: функции из **`messages`**, **`onlc_text_and_data`** из **`keyboards`**. |
+| [`messages.py`](../tgbot/ui/messages.py) | Форматирование карточек процедуры и конкурсного листа позиций; разбиение текста на части по лимиту Telegram. |
+| [`keyboards.py`](../tgbot/ui/keyboards.py) | Кортеж **`onlc_text_and_data`**: подпись кнопки → **`callback_data`** (строка с id категорий API через запятую). |
+| [`callbacks.py`](../tgbot/ui/callbacks.py) | Разбор **`m|<offset>|<cat_str>`** для кнопки «Показать ещё», **`au|<offset>`** для списка пользователей, **`adel` / `adelx`** для подтверждения удаления и **`mf|<id>|1|…` / `mf|<id>|0|…`** для «Подходит» / «Не подходит». |
 
 ## Реализация
 
 ### `beautiful_procedure`
 
 - Строит одну HTML-сообщение: ссылка (**`hlink`**) на организатора и id процедуры, поля названия, НДС, даты переторжки, маркер в конце.
-- Используются **`aiogram.utils.markdown.hbold`** / **`hlink`** — совместимо с **`ParseMode.HTML`** в [`bot.py`](../bot.py).
+- Используются **`aiogram.utils.markdown.hbold`** / **`hlink`** — совместимо с **`ParseMode.HTML`** в [`tgbot/app.py`](../tgbot/app.py).
 
 ### `beautiful_positions`
 
@@ -31,4 +31,4 @@
 ### `onlc_text_and_data`
 
 - Используется в **`/start`**: каждая пара **(текст кнопки, callback_data)** попадает в **`InlineKeyboardButton`**.
-- Набор **`callback_data`** должен совпадать с тем, что ожидает фильтр **`CATEGORY_CALLBACK_IDS`** в [`bot.py`](../bot.py) (множество строк из вторых элементов кортежа).
+- Набор **`callback_data`** должен совпадать с тем, что ожидает фильтр **`CATEGORY_CALLBACK_IDS`** в [`tgbot/user.py`](../tgbot/user.py) (множество строк из вторых элементов кортежа).

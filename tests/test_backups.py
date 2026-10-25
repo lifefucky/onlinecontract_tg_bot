@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import db.models  # noqa: F401  # register tables on Base.metadata
-from backups import (
+from jobs.backups import (
     BACKUP_STATE_KEY,
     backup_delay_until_attempt,
     backup_interval_seconds,

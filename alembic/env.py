@@ -13,7 +13,14 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
 
-ROOT = Path(__file__).resolve().parents[1]
+# Bootstrap before importing project modules. ``project_root`` does not read TOKEN.
+_BOOTSTRAP = Path(__file__).resolve().parents[1]
+if str(_BOOTSTRAP) not in sys.path:
+    sys.path.insert(0, str(_BOOTSTRAP))
+
+from misc.paths import project_root  # noqa: E402
+
+ROOT = project_root()
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 

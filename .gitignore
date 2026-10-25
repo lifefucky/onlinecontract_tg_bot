@@ -3,7 +3,6 @@ trash.py
 __pycache__/
 *.py[cod]
 
-misc/env.py
 .env
 
 AGENTS.md
@@ -12,11 +11,15 @@ AGENTS.md
 
 plans/
 
+.venv/
+.pytest_cache/
+
 # Local SQLite (optional file DB; see DATABASE_URL)
 data/
 
-# Local research folder (notes, price list, secrets, caches). Not product docs.
+# Legacy local fallback (notes, old price list, secrets, caches). Not product docs.
 *.env
+!example.env
 docs/research/
 
 # Embedding cache. Recomputed from the price list, not committed.

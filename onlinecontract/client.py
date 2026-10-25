@@ -1,9 +1,50 @@
 from typing import Any, List, Optional
 
-import requests
+import httpx
 
 PROCEDURES_URL = "https://api.onlc.ru/purchases/v1/public/procedures"
-POSITIONS_URL_TEMPLATE = "https://api.onlc.ru/purchases/v1/public/procedures/{}/positions"
+POSITIONS_URL = "https://api.onlc.ru/purchases/v1/public/procedures/{procedure_id}/positions"
+TENDER_LINK = "https://onlinecontract.ru/tenders/{procedure_id}"
+
+HTTPError = httpx.HTTPError
+
+
+def _requests_params(params: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Encode booleans the way ``requests`` did (``total=True``, not ``total=true``)."""
+    if params is None:
+        return None
+    encoded: dict[str, Any] = {}
+    for key, value in params.items():
+        if isinstance(value, bool):
+            encoded[key] = "True" if value else "False"
+        else:
+            encoded[key] = value
+    return encoded
+
+
+def api_client(timeout: float) -> httpx.Client:
+    """Shared client for callers that issue more than one GET."""
+    return httpx.Client(timeout=timeout)
+
+
+def api_get(
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+    timeout: float = 60,
+    client: httpx.Client | None = None,
+    follow_redirects: bool = False,
+) -> httpx.Response:
+    """One GET. Transport errors propagate as ``httpx.HTTPError``.
+
+    A caller-owned ``client`` keeps its own timeout. ``follow_redirects`` stays
+    false for the matching fetch (previous httpx default) and true for
+    ``OnlineContract`` (previous requests default).
+    """
+    query = _requests_params(params)
+    if client is not None:
+        return client.get(url, params=query, follow_redirects=follow_redirects)
+    return httpx.get(url, params=query, timeout=timeout, follow_redirects=follow_redirects)
 
 
 class OnlineContract:
@@ -37,7 +78,12 @@ class OnlineContract:
         return self
 
     def fetch_current_procedures(self) -> dict[str, Any]:
-        response = requests.get(PROCEDURES_URL, params=self.procedures_params, timeout=60)
+        response = api_get(
+            PROCEDURES_URL,
+            params=self.procedures_params,
+            timeout=60,
+            follow_redirects=True,
+        )
         if response.status_code != 200:
             return {}
         try:
@@ -67,14 +113,14 @@ class OnlineContract:
             item = {k: row.get(k) for k in self.procedures_kc if k != "owner"}
             item["owner"] = owner_name
             pid = row.get("id")
-            item["link"] = f"https://onlinecontract.ru/tenders/{pid}"
+            item["link"] = TENDER_LINK.format(procedure_id=pid)
             out.append(item)
         return out
 
     @staticmethod
     def fetch_positions_for_procedure(procedure_id: str) -> dict[str, Any]:
-        url = POSITIONS_URL_TEMPLATE.format(procedure_id)
-        response = requests.get(url, timeout=60)
+        url = POSITIONS_URL.format(procedure_id=procedure_id)
+        response = api_get(url, timeout=60, follow_redirects=True)
         if response.status_code != 200:
             return {}
         try:

@@ -19,6 +19,7 @@ import numpy as np
 from matching.attributes import cleanup_embed, false_friend, normalize
 from matching.catalog import Sku
 from matching.categories import NEGATIVE_SAMPLES
+from onlinecontract.client import TENDER_LINK
 from matching.config import (
     FIT_MIN_COSINE,
     METHOD,
@@ -27,7 +28,6 @@ from matching.config import (
     NEIGHBOR_K,
     NEIGHBOR_MAJORITY,
     NEAR_MIN_COSINE,
-    TENDER_LINK,
 )
 from matching.errors import PipelineError
 

@@ -7,15 +7,13 @@ import os
 
 import pytest
 
-import intersection_feed
+import jobs.intersection_feed as intersection_feed
 from db.repositories import kv, shown, users
 from db.schemas.user import UserStart
 from db.session import bind_engine, create_async_engine_from_url, get_session_maker, init_db_schema, reset_engine
-from intersection_feed import (
+from jobs.intersection_feed import (
     SEEN_PROCEDURES_KEY,
     active_list_trusted,
-    content_hash,
-    format_match_card,
     load_seen_procedure_ids,
     match_poll_interval_seconds,
     match_poll_loop,
@@ -29,6 +27,7 @@ from intersection_feed import (
     select_new_procedures,
     select_unseen,
 )
+from jobs.match_cards import content_hash, format_match_card
 
 
 @pytest.fixture(autouse=True)
@@ -904,14 +903,14 @@ async def test_admin_notice_failure_is_not_retried(monkeypatch, caplog):
             raise RuntimeError("blocked")
 
     bot = BadBot()
-    with caplog.at_level(logging.ERROR, logger="intersection_feed"):
+    with caplog.at_level(logging.ERROR, logger="jobs.intersection_feed"):
         await notify_match_admins(bot, "Не удалось получить список конкурсных листов.")
     assert bot.calls == 2
     assert caplog.text.count("admin notice failed") == 2
 
     monkeypatch.setenv("ADMIN_IDS", "nope")
     bot.calls = 0
-    with caplog.at_level(logging.ERROR, logger="intersection_feed"):
+    with caplog.at_level(logging.ERROR, logger="jobs.intersection_feed"):
         await notify_match_admins(bot, "Не удалось получить список конкурсных листов.")
     assert bot.calls == 0
     assert "ADMIN_IDS is unreadable" in caplog.text

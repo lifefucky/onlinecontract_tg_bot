@@ -4,15 +4,15 @@ import os
 
 import pytest
 
-from access import should_deny_access
-from bot_admin import format_stats, format_user_card, format_user_list
+from tgbot.admin import format_stats, format_user_card, format_user_list
+from tgbot.middleware import should_deny_access
 from db.enums import StartResult
 from db.repositories import chats, kv, message_tracks, users
 from db.repositories.kv import DIALOG_RESET_ALL_KEY
 from db.schemas.chat import ChatUpsert
 from db.schemas.user import UserPage, UserRow, UserStart, UserStats
 from db.session import bind_engine, create_async_engine_from_url, get_session_maker, init_db_schema, reset_engine
-from dialogs import interrupt_all_dialogs_once
+from tgbot.dialogs import interrupt_all_dialogs_once
 from misc.admins import get_admin_ids, parse_id_and_reason
 
 

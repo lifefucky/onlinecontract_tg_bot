@@ -18,8 +18,11 @@ logger = logging.getLogger(__name__)
 class Embedder:
     def __init__(self) -> None:
         self.client = None
+        read_dir = config.embedding_read_dir()
         self.cache_path = config.CACHE_DIR / "embeddings_bge_m3.npz"
         self.meta_path = config.CACHE_DIR / "embeddings_meta.json"
+        self._read_cache_path = read_dir / "embeddings_bge_m3.npz"
+        self._read_meta_path = read_dir / "embeddings_meta.json"
         self._texts: list[str] = []
         self._matrix: np.ndarray | None = None
         self._index: dict[str, int] = {}
@@ -40,13 +43,13 @@ class Embedder:
         return self.client
 
     def _load(self) -> None:
-        if not self.cache_path.exists() or not self.meta_path.exists():
+        if not self._read_cache_path.exists() or not self._read_meta_path.exists():
             return
-        meta = json.loads(self.meta_path.read_text(encoding="utf-8"))
+        meta = json.loads(self._read_meta_path.read_text(encoding="utf-8"))
         if meta.get("model") != config.EMBED_MODEL:
             return
         self._texts = list(meta.get("texts") or [])
-        matrix = np.load(self.cache_path)["vectors"]
+        matrix = np.load(self._read_cache_path)["vectors"]
         if matrix.ndim != 2 or len(self._texts) != matrix.shape[0]:
             self._texts = []
             return

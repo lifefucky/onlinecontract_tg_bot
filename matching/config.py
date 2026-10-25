@@ -1,7 +1,7 @@
 """Paths, model id, and the «подходит» / «пограничный» threshold.
 
 The embedding key is read from the project ``.env`` (see ``misc.load_env``).
-``docs/research/.env`` fills only variables that are still empty. This module
+``docs/research/.env`` fills gaps only when that file exists. This module
 never prints ``OPENAI_API_KEY``.
 """
 
@@ -13,11 +13,15 @@ import os
 from pathlib import Path
 
 from misc.load_env import load_project_env
+from misc.paths import project_root
 
 PACKAGE_DIR = Path(__file__).resolve().parent
-REPO_ROOT = PACKAGE_DIR.parent
+REPO_ROOT = project_root()
+DATA_DIR = REPO_ROOT / "data"
 RESEARCH_DIR = REPO_ROOT / "docs" / "research"
-RUN_DIR = RESEARCH_DIR / "matches" / "run"
+# New run files are written here. ``docs/research/matches/run`` is not read:
+# owner labels live in the database, and the old exact/disputed jsonl files are not scored.
+RUN_DIR = DATA_DIR / "matches" / "run"
 
 load_project_env()
 
@@ -26,25 +30,40 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 
 def resolve_cache_dir() -> Path:
-    """Prefer ``matching/cache``. Reuse the old research cache when that is the one on disk."""
-    new_dir = PACKAGE_DIR / "cache"
-    old_dir = RESEARCH_DIR / "pipeline" / "cache"
-    if (new_dir / "embeddings_meta.json").is_file():
-        return new_dir
-    if (old_dir / "embeddings_meta.json").is_file():
-        return old_dir
-    return new_dir
+    """Directory for new embedding and HTTP cache files: ``matching/cache``."""
+    return PACKAGE_DIR / "cache"
 
 
 CACHE_DIR = resolve_cache_dir()
 
+
+def embedding_read_dir() -> Path:
+    """Where an existing embedding cache is read from.
+
+    ``matching/cache`` when ``embeddings_meta.json`` is already there. Otherwise
+    the legacy ``docs/research/pipeline/cache`` when that meta file exists, so a
+    checkout that already embedded the price list does not call the model again.
+    A missing research directory does not raise. New files are written to
+    ``matching/cache``.
+    """
+    new_dir = CACHE_DIR
+    if (new_dir / "embeddings_meta.json").is_file():
+        return new_dir
+    # A redirected cache (tests) must not open the checkout's research folder.
+    if new_dir != PACKAGE_DIR / "cache":
+        return new_dir
+    old_meta = RESEARCH_DIR / "pipeline" / "cache" / "embeddings_meta.json"
+    try:
+        if old_meta.is_file():
+            return old_meta.parent
+    except OSError:
+        return new_dir
+    return new_dir
+
+
 # ProxyAPI exposes BGE-M3 as an OpenAI-compatible dense embedding.
 EMBED_MODEL = "baai/bge-m3"
 EMBED_BATCH = 64
-
-PROCEDURES_URL = "https://api.onlc.ru/purchases/v1/public/procedures"
-POSITIONS_URL = "https://api.onlc.ru/purchases/v1/public/procedures/{procedure_id}/positions"
-TENDER_LINK = "https://onlinecontract.ru/tenders/{procedure_id}"
 
 METHOD = "public_text_bge_m3_category_nn"
 

@@ -1,6 +1,6 @@
-"""Tests for utils/beautiful_msg.py (no network)."""
+"""Tests for tgbot/ui/messages.py (no network)."""
 
-from utils.beautiful_msg import (
+from tgbot.ui.messages import (
     beautiful_positions,
     beautiful_procedure,
     split_telegram_messages,

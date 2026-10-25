@@ -1,4 +1,4 @@
-"""Pytest configuration: TOKEN must exist before importing bot or misc."""
+"""Pytest configuration: TOKEN must exist before importing tgbot.app or misc."""
 
 import os
 

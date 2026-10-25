@@ -1,8 +1,12 @@
-"""Load the project ``.env`` once. Variables already set in the process stay as they are."""
+"""Load the project ``.env`` once. Variables already set in the process stay as they are.
 
-from pathlib import Path
+The root ``.env`` is the source. ``docs/research/.env`` is a legacy gap-fill: it is
+read only when that file exists and does not override variables already set.
+"""
 
 from dotenv import load_dotenv
+
+from misc.paths import project_root
 
 _loaded = False
 
@@ -12,7 +16,8 @@ def load_project_env() -> None:
     if _loaded:
         return
     _loaded = True
-    root = Path(__file__).resolve().parent.parent
+    root = project_root()
     load_dotenv(root / ".env", override=False)
-    # Older checkouts kept the embedding key here. It fills gaps only.
-    load_dotenv(root / "docs" / "research" / ".env", override=False)
+    legacy = root / "docs" / "research" / ".env"
+    if legacy.is_file():
+        load_dotenv(legacy, override=False)

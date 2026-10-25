@@ -17,6 +17,7 @@ from sqlalchemy.pool import NullPool, StaticPool
 
 from db.base import Base
 from misc.db_url import get_database_url, is_in_memory_sqlite, sqlite_file_path
+from misc.paths import project_root
 
 _engine: AsyncEngine | None = None
 _session_maker: async_sessionmaker[AsyncSession] | None = None
@@ -56,7 +57,7 @@ def get_session_maker(engine: AsyncEngine | None = None) -> async_sessionmaker[A
 
 
 def _project_root() -> Path:
-    return Path(__file__).resolve().parent.parent
+    return project_root()
 
 
 def _alembic_config() -> Config:

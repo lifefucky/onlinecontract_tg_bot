@@ -8,19 +8,34 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import httpx
-
-from matching.config import CACHE_DIR, FETCH_TIMEOUT, FETCH_WORKERS, POSITIONS_URL, PROCEDURES_URL
+from onlinecontract.client import HTTPError, POSITIONS_URL, PROCEDURES_URL, api_client, api_get
+from matching.config import CACHE_DIR, FETCH_TIMEOUT, FETCH_WORKERS, PACKAGE_DIR, RESEARCH_DIR
 
 logger = logging.getLogger(__name__)
 
 
+def _cached_file(relative: str) -> Path:
+    """Read ``matching/cache`` first. Reuse the legacy research file when it is the one on disk.
+
+    New files are still written under ``CACHE_DIR``. A redirected cache (tests) and a
+    missing research directory do not fall through or raise.
+    """
+    new_path = CACHE_DIR / relative
+    if new_path.is_file():
+        return new_path
+    if CACHE_DIR != PACKAGE_DIR / "cache":
+        return new_path
+    legacy = RESEARCH_DIR / "pipeline" / "cache" / relative
+    try:
+        if legacy.is_file():
+            return legacy
+    except OSError:
+        return new_path
+    return new_path
+
+
 def _procedures_path() -> Path:
-    return CACHE_DIR / "procedures.json"
-
-
-def _positions_dir() -> Path:
-    return CACHE_DIR / "positions"
+    return _cached_file("procedures.json")
 
 
 def fetch_procedures(refresh: bool = False, *, progress: bool = True) -> list[dict]:
@@ -29,7 +44,7 @@ def fetch_procedures(refresh: bool = False, *, progress: bool = True) -> list[di
             logger.info(message)
 
     path = _procedures_path()
-    if path.exists() and not refresh:
+    if path.is_file() and not refresh:
         cached = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(cached, list) and len(cached) >= 400:
             say(f"procedures cache {len(cached)}")
@@ -37,13 +52,13 @@ def fetch_procedures(refresh: bool = False, *, progress: bool = True) -> list[di
     rows: list[dict] = []
     offset = 0
     total: int | None = None
-    with httpx.Client(timeout=FETCH_TIMEOUT) as client:
+    with api_client(FETCH_TIMEOUT) as client:
         while True:
             url = (
                 f"{PROCEDURES_URL}?filters[status]=1&limit=100&offset={offset}"
                 "&include=owner&total=true"
             )
-            response = client.get(url)
+            response = api_get(url, client=client)
             response.raise_for_status()
             payload = response.json()
             batch = payload.get("data") or []
@@ -66,7 +81,7 @@ def fetch_procedures(refresh: bool = False, *, progress: bool = True) -> list[di
         seen.add(procedure_id)
         unique.append(row)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(unique, ensure_ascii=False), encoding="utf-8")
+    (CACHE_DIR / "procedures.json").write_text(json.dumps(unique, ensure_ascii=False), encoding="utf-8")
     say(f"procedures fetched {len(unique)}")
     return unique
 
@@ -94,16 +109,18 @@ def cached_procedure_ids() -> set[int] | None:
 
 
 def _fetch_one(procedure_id: int, *, refresh: bool = False) -> None:
-    destination = _positions_dir() / f"{procedure_id}.json"
-    if destination.exists() and not refresh:
+    relative = f"positions/{procedure_id}.json"
+    destination = CACHE_DIR / relative
+    if not refresh and _cached_file(relative).is_file():
         return
+    destination.parent.mkdir(parents=True, exist_ok=True)
     url = POSITIONS_URL.format(procedure_id=procedure_id)
     last_error = "no response"
-    with httpx.Client(timeout=FETCH_TIMEOUT) as client:
+    with api_client(FETCH_TIMEOUT) as client:
         for attempt in range(4):
             try:
-                response = client.get(url)
-            except httpx.HTTPError as exc:
+                response = api_get(url, client=client)
+            except HTTPError as exc:
                 last_error = type(exc).__name__
                 continue
             if response.status_code == 200:
@@ -151,10 +168,9 @@ def stale_position_ids(
     A procedure that stays active is re-read at most once per that window.
     """
     moment = time.time() if now is None else now
-    folder = _positions_dir()
     stale: list[int] = []
     for procedure_id in procedure_ids:
-        path = folder / f"{procedure_id}.json"
+        path = _cached_file(f"positions/{procedure_id}.json")
         if not path.is_file():
             stale.append(procedure_id)
             continue
@@ -169,8 +185,9 @@ def fetch_positions(
     refresh: bool = False,
     refresh_ids: set[int] | None = None,
 ) -> tuple[dict[int, list[dict]], dict[int, dict[str, str]]]:
-    folder = _positions_dir()
-    folder.mkdir(parents=True, exist_ok=True)
+    def _have(procedure_id: int) -> bool:
+        return _cached_file(f"positions/{procedure_id}.json").is_file()
+
     if refresh:
         missing = list(procedure_ids)
     elif refresh_ids is not None:
@@ -178,10 +195,10 @@ def fetch_positions(
         missing = [
             procedure_id
             for procedure_id in procedure_ids
-            if procedure_id in wanted or not (folder / f"{procedure_id}.json").exists()
+            if procedure_id in wanted or not _have(procedure_id)
         ]
     else:
-        missing = [procedure_id for procedure_id in procedure_ids if not (folder / f"{procedure_id}.json").exists()]
+        missing = [procedure_id for procedure_id in procedure_ids if not _have(procedure_id)]
     if missing:
         logger.info("fetching positions %s", len(missing))
         done = 0
@@ -198,7 +215,7 @@ def fetch_positions(
     loaded: dict[int, list[dict]] = {}
     terms: dict[int, dict[str, str]] = {}
     for procedure_id in procedure_ids:
-        payload = json.loads((folder / f"{procedure_id}.json").read_text(encoding="utf-8"))
+        payload = json.loads(_cached_file(f"positions/{procedure_id}.json").read_text(encoding="utf-8"))
         rows = payload.get("data") if isinstance(payload, dict) else None
         row_list = [row for row in rows or [] if isinstance(row, dict)]
         terms[procedure_id] = shared_sheet_terms(row_list)
@@ -221,10 +238,9 @@ def fetch_positions(
 
 def position_error_ids(procedure_ids: list[int]) -> set[int]:
     """Ids whose position file is missing or records a failed download."""
-    folder = _positions_dir()
     failed: set[int] = set()
     for procedure_id in procedure_ids:
-        path = folder / f"{procedure_id}.json"
+        path = _cached_file(f"positions/{procedure_id}.json")
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):

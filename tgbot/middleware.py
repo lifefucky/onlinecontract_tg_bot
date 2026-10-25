@@ -1,4 +1,4 @@
-"""Stop banned people from using the bot. Owners listed in ADMIN_IDS stay allowed."""
+"""One database session per update, then the closed-access check."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from aiogram.types import CallbackQuery, ChatMemberUpdated, Message, TelegramObj
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.repositories import users
+from db.session import get_session_maker
 from misc.admins import get_admin_ids
 
 ACCESS_CLOSED = "доступ закрыт"
@@ -34,6 +35,27 @@ async def _reply_closed(event: TelegramObject) -> None:
             await event.answer(ACCESS_CLOSED)
     except Exception:
         logging.debug("access closed reply failed", exc_info=True)
+
+
+class DbSessionMiddleware(BaseMiddleware):
+    """One AsyncSession per update with commit on success."""
+
+    async def __call__(
+        self,
+        handler: Any,
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        maker = get_session_maker()
+        async with maker() as session:
+            data["session"] = session
+            try:
+                result = await handler(event, data)
+                await session.commit()
+                return result
+            except Exception:
+                await session.rollback()
+                raise
 
 
 class AccessMiddleware(BaseMiddleware):

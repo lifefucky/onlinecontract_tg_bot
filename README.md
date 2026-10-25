@@ -10,7 +10,7 @@ Telegram-бот на **aiogram 3.x** показывает пользовател
 |--------|------------|
 | Язык | Python **3.10–3.12** (рекомендуется для стабильных wheels у aiogram/aiohttp) |
 | Telegram | **aiogram** 3.x, HTML parse mode |
-| HTTP к API площадки | **requests** (вызовы из asyncio через `asyncio.to_thread`) |
+| HTTP к API площадки | **httpx** (вызовы из asyncio через `asyncio.to_thread`) |
 | БД | **SQLite**, **SQLAlchemy** 2.x (async), **aiosqlite**, **Pydantic** 2.x |
 | Миграции | **Alembic** (схема поднимается при старте через `init_db_schema`) |
 
@@ -18,7 +18,7 @@ Telegram-бот на **aiogram 3.x** показывает пользовател
 
 ## 3. Архитектура решения
 
-**Вкратце:** `bot.py` — точка входа: `Dispatcher`, middleware с одной сессией БД на update, обработчики команд и callback. Ответы API кэшируются в SQLite; тексты карточек формируются в `utils/` (в т.ч. `beautiful_msg`). Клиент к `api.onlc.ru` — класс `OnlineContract` в `fetch_modules/online_trade.py`. Рядом работают запрет закрытого доступа (`access.py`), команды владельца (`bot_admin.py`), сброс диалога (`dialogs.py`), снимок базы (`backups.py`) и рассылка пересечений с прайсом (`intersection_feed.py`).
+**Вкратце:** `bot.py` запускает `tgbot.app`: `Dispatcher`, middleware с одной сессией БД на update, обработчики команд и callback. Ответы API кэшируются в SQLite; тексты карточек формируются в `tgbot/ui/`. Клиент к `api.onlc.ru` — класс `OnlineContract` в `onlinecontract/client.py`. Команды владельца — `tgbot/admin.py`, запрет доступа — `tgbot/middleware.py`, сброс диалога — `tgbot/dialogs.py`, снимок базы — `jobs/backups.py`, рассылка пересечений с прайсом — `jobs/intersection_feed.py`.
 
 Подробнее: [`docs/architecture.md`](docs/architecture.md), схема БД: [`docs/database.md`](docs/database.md).
 
@@ -31,7 +31,7 @@ flowchart LR
   bot --> db[(SQLite)]
   bot --> oc[OnlineContract]
   oc --> api["api.onlc.ru"]
-  bot --> fmt[beautiful_msg / utils]
+  bot --> fmt[tgbot/ui]
   fmt --> tg
 ```
 

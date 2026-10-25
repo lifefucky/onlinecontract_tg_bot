@@ -20,9 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.repositories import labels, users
 from db.schemas.user import UserPage, UserRow, UserStats
-from dialogs import interrupt_dialog
 from misc.admins import get_admin_ids, parse_id_and_reason
-from utils.callbacks import parse_delete_user_callback, parse_match_feedback, parse_users_page
+from tgbot.dialogs import interrupt_dialog
+from tgbot.ui.callbacks import parse_delete_user_callback, parse_match_feedback, parse_users_page
 
 USERS_PAGE_SIZE = 8
 

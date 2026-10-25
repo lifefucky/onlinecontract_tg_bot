@@ -9,14 +9,14 @@ pip install -r requirements.txt -r requirements-dev.txt
 pytest
 ```
 
-Каталог: [`tests/`](../tests/). Перед импортом [`bot`](../bot.py) нужен **`TOKEN`** в окружении; для pytest в [`tests/conftest.py`](../tests/conftest.py) задаётся тестовый placeholder.
+Каталог: [`tests/`](../tests/). Перед импортом [`tgbot.app`](../tgbot/app.py) нужен **`TOKEN`** в окружении; для pytest в [`tests/conftest.py`](../tests/conftest.py) задаётся тестовый placeholder.
 
 Покрытие:
 
 | Файл | Содержание |
 |------|------------|
 | `test_beautiful_msg.py` | Форматирование карточек и `split_telegram_messages` |
-| `test_online_trade.py` | `OnlineContract` с моком `requests.get` |
+| `test_online_trade.py` | `OnlineContract` с моком `api_get` |
 | `test_categories.py` | Согласованность `onlc_text_and_data` и `CATEGORY_CALLBACK_IDS` |
 | `test_callbacks.py` | Парсинг пагинации `m|…`, страницы списка `au|…`, подтверждения удаления `adel` / `adelx` и ответа по листу `mf|…` |
 | `test_db_repositories.py` | Репозитории БД (см. [`database.md`](database.md)) |
@@ -33,12 +33,12 @@ pytest
 
 1. **Запуск:** `TOKEN` в окружении (см. [`example.env`](../example.env)), затем `python bot.py` из корня проекта.
 2. **Telegram:** `/start` — кнопки категорий; выбор категории — приходят карточки; при большом числе процедур — «Показать ещё»; «Позиции» — конкурсный лист (при очень длинном тексте — несколько сообщений).
-3. **Сбои API:** при недоступности `api.onlc.ru` бот должен отвечать текстом об ошибке, а не падать (см. обработку `None` в [`bot.py`](../bot.py)).
+3. **Сбои API:** при недоступности `api.onlc.ru` бот должен отвечать текстом об ошибке, а не падать (см. обработку `None` в [`tgbot/user.py`](../tgbot/user.py)).
 4. **Владелец** (`ADMIN_IDS`, личный чат): `/stats`, `/users`, `/user <id>`, `/ban`, `/unban`, `/reset`, `/delete_user` (удаление только после кнопки «Удалить»). После `/ban` или подтверждённого `/delete_user` повторный `/start` отвечает «доступ закрыт». `/help` у владельца длиннее, чем у остальных.
 5. **Пересечения с прайсом** отдельной команды не имеют: карточки приходят сами, с периодом `MATCH_POLL_INTERVAL_MINUTES`. «Подходит» приходит всем, «пограничный» — только владельцу. У всех это карточка процедуры и кнопка «Позиции»; у владельца к тексту добавляются категории, «N из M» и «похоже на», под карточкой — «Подходит» и «Не подходит».
 
 ## Связанные документы
 
 - Зависимости и версия Python: [`requirements.txt`](../requirements.txt)
-- Поведение бота: [`architecture.md`](architecture.md), [`bot.py`](../bot.py)
+- Поведение бота: [`architecture.md`](architecture.md), [`tgbot/user.py`](../tgbot/user.py)
 - БД и тесты репозиториев: [`database.md`](database.md)

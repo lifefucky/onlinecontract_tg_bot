@@ -9,7 +9,7 @@ Run from the repository root:
 
 The embedding key is loaded from the project ``.env`` and is never printed.
 A full price-list embed is not started unless ``--embed-catalog`` is passed
-or ``MATCH_ALLOW_CATALOG_EMBED=1``. Output goes to docs/research/matches/run/.
+or ``MATCH_ALLOW_CATALOG_EMBED=1``. Output goes to data/matches/run/.
 Owner labels in ``match_labels`` are the gold set. The old exact/disputed
 jsonl files are a draft of the previous logic and are not scored.
 Tender attachments are not downloaded.
