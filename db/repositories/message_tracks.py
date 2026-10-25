@@ -58,15 +58,21 @@ async def delete_tracks_for_scope(
     return ids
 
 
-async def delete_tracks_for_scopes(
-    session: AsyncSession,
-    *,
-    telegram_chat_id: int,
-    scopes: list[str],
-) -> dict[str, list[int]]:
-    out: dict[str, list[int]] = {}
-    for scope in scopes:
-        out[scope] = await delete_tracks_for_scope(
-            session, telegram_chat_id=telegram_chat_id, scope=scope
-        )
-    return out
+async def snapshot_dialogs(session: AsyncSession) -> dict[int, list[int]]:
+    """Every known chat and the tracked message ids still stored for it."""
+    chat_ids = await session.scalars(select(TelegramChat.telegram_chat_id))
+    grouped: dict[int, list[int]] = {int(cid): [] for cid in chat_ids.all()}
+    stmt = (
+        select(TelegramChat.telegram_chat_id, BotMessageTrack.telegram_message_id)
+        .join(TelegramChat, TelegramChat.id == BotMessageTrack.chat_id)
+        .order_by(TelegramChat.telegram_chat_id, BotMessageTrack.sort_order, BotMessageTrack.id)
+    )
+    result = await session.execute(stmt)
+    for telegram_chat_id, message_id in result.all():
+        grouped.setdefault(int(telegram_chat_id), []).append(int(message_id))
+    return grouped
+
+
+async def delete_all_tracks(session: AsyncSession) -> None:
+    await session.execute(delete(BotMessageTrack))
+    await session.flush()

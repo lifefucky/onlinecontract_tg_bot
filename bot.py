@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 from typing import Any
 
@@ -6,16 +7,31 @@ from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, TelegramObject
+from aiogram.types import (
+    CallbackQuery,
+    ChatMemberUpdated,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    TelegramObject,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from access import ACCESS_CLOSED, AccessMiddleware
+from backups import backup_loop
+from bot_admin import admin_help_text, install_command_menu, register_admin_handlers
+from intersection_feed import match_poll_loop
 from db import init_db_schema
-from db.enums import MessageTrackScope
-from db.repositories import api_cache, chats, message_tracks
+from db.enums import MessageTrackScope, StartResult
+from db.repositories import api_cache, chats, message_tracks, users
 from db.schemas.chat import ChatRow, ChatUpsert
+from db.schemas.user import UserStart
 from db.session import get_session_maker
+from dialogs import delete_messages, drop_dialog_tracks, erase_tracked_messages, interrupt_all_dialogs_once
 from fetch_modules.online_trade import OnlineContract
 from misc import TgKeys
+from misc.admins import get_admin_ids
+from misc.db_url import get_database_url, is_in_memory_sqlite
 from utils import (
     beautiful_positions,
     beautiful_procedure,
@@ -70,15 +86,6 @@ def _telegram_chat_id_from_callback(query: CallbackQuery) -> int:
     return query.from_user.id
 
 
-async def _delete_telegram_messages(telegram_chat_id: int, message_ids: list[int]) -> None:
-    for mid in message_ids:
-        try:
-            await bot.delete_message(telegram_chat_id, mid)
-        except Exception:
-            pass
-        await asyncio.sleep(0.03)
-
-
 class DbSessionMiddleware(BaseMiddleware):
     """One AsyncSession per update with commit on success."""
 
@@ -101,6 +108,8 @@ class DbSessionMiddleware(BaseMiddleware):
 
 
 dp.update.middleware(DbSessionMiddleware())
+dp.update.middleware(AccessMiddleware())
+register_admin_handlers(dp)
 
 
 async def _ensure_procedures(session: AsyncSession, cat_str: str):
@@ -185,17 +194,32 @@ async def _render_procedure_chunk(
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message, session: AsyncSession) -> None:
+    actor = message.from_user
+    if actor is not None and _chat_type_str(message.chat) == "private":
+        _row, outcome = await users.register_start(
+            session,
+            UserStart(
+                telegram_user_id=actor.id,
+                username=actor.username,
+                first_name=actor.first_name,
+                last_name=actor.last_name,
+                language_code=actor.language_code,
+            ),
+        )
+        if outcome is StartResult.banned and actor.id not in get_admin_ids():
+            await message.answer(ACCESS_CLOSED)
+            return
+        if outcome is not StartResult.banned:
+            logging.info("user started telegram_user_id=%s", actor.id)
+        if actor.id in get_admin_ids():
+            await install_command_menu(bot)
+
     await api_cache.clear_all(session)
 
     chat_row = await chats.upsert_chat(session, _chat_upsert_from_message(message))
     tid = message.chat.id
-    for scope in (
-        MessageTrackScope.procedures,
-        MessageTrackScope.positions,
-        MessageTrackScope.welcome,
-    ):
-        ids = await message_tracks.delete_tracks_for_scope(session, telegram_chat_id=tid, scope=scope)
-        await _delete_telegram_messages(tid, ids)
+    tracked_ids = await drop_dialog_tracks(session, tid)
+    await erase_tracked_messages(bot, tid, tracked_ids)
 
     text = (
         "Бот показывает открытые процедуры с площадки onlinecontract.ru "
@@ -227,13 +251,21 @@ def _category_keyboard() -> InlineKeyboardMarkup:
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message) -> None:
-    await message.reply(
+    text = (
         "Как пользоваться:\n"
         "• /start — выбрать тематику и получить список процедур.\n"
         "• По кнопке «Позиции» под карточкой — конкурсный лист по этой процедуре.\n"
         "• Если торгов много, они приходят частями — внизу будет кнопка «Показать ещё».\n\n"
         "Команда /clear пытается удалить до 30 последних сообщений в чате (только то, что бот может удалить)."
     )
+    actor = message.from_user
+    if (
+        actor is not None
+        and actor.id in get_admin_ids()
+        and _chat_type_str(message.chat) == "private"
+    ):
+        text += admin_help_text()
+    await message.reply(text)
 
 
 @dp.message(Command("clear"))
@@ -278,7 +310,7 @@ async def on_category_selected(query: CallbackQuery, session: AsyncSession) -> N
     proc_ids = await message_tracks.delete_tracks_for_scope(
         session, telegram_chat_id=tid, scope=MessageTrackScope.procedures
     )
-    await _delete_telegram_messages(tid, proc_ids)
+    await delete_messages(bot, tid, proc_ids)
 
     status = await bot.send_message(tid, "Ищу процедуры…")
     await _ensure_procedures(session, cat_str)
@@ -299,7 +331,7 @@ async def on_positions(callback_query: CallbackQuery, session: AsyncSession) -> 
     pos_ids = await message_tracks.delete_tracks_for_scope(
         session, telegram_chat_id=tid, scope=MessageTrackScope.positions
     )
-    await _delete_telegram_messages(tid, pos_ids)
+    await delete_messages(bot, tid, pos_ids)
 
     oc = OnlineContract()
     data = await asyncio.to_thread(oc.get_positions, procedure_id)
@@ -336,9 +368,53 @@ async def on_positions(callback_query: CallbackQuery, session: AsyncSession) -> 
         await _track_pos(msg.message_id, i)
 
 
+@dp.my_chat_member()
+async def on_my_chat_member(event: ChatMemberUpdated, session: AsyncSession) -> None:
+    """Private chats: the user blocked or unblocked the bot.
+
+    ``new_chat_member.user`` is the bot. The person is ``from_user``.
+    """
+    if _chat_type_str(event.chat) != "private" or event.from_user is None:
+        return
+    status = event.new_chat_member.status
+    status_s = status.value if hasattr(status, "value") else str(status)
+    if status_s == "kicked":
+        await users.mark_bot_blocked(session, event.from_user.id, blocked=True)
+    elif status_s == "member":
+        await users.mark_bot_blocked(session, event.from_user.id, blocked=False)
+
+
 async def main() -> None:
     await init_db_schema()
-    await dp.start_polling(bot, drop_pending_updates=True)
+    # Alembic's fileConfig leaves the root logger at WARN and disables loggers created earlier.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)-5.5s [%(name)s] %(message)s",
+        force=True,
+    )
+    for existing in logging.root.manager.loggerDict.values():
+        if isinstance(existing, logging.Logger):
+            existing.disabled = False
+    if is_in_memory_sqlite(get_database_url()):
+        logging.warning(
+            "DATABASE_URL is in-memory; the user journal is lost on restart. "
+            "Set DATABASE_URL=sqlite+aiosqlite:///./data/app.db"
+        )
+    admin_ids = get_admin_ids()
+    if not admin_ids:
+        logging.warning("ADMIN_IDS is empty; owner commands are disabled")
+    await interrupt_all_dialogs_once(bot, get_session_maker())
+    await install_command_menu(bot)
+    backup_task = asyncio.create_task(backup_loop(bot))
+    match_task = asyncio.create_task(match_poll_loop(bot))
+    try:
+        await dp.start_polling(bot, drop_pending_updates=True)
+    finally:
+        backup_task.cancel()
+        match_task.cancel()
+        for task in (backup_task, match_task):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 if __name__ == "__main__":

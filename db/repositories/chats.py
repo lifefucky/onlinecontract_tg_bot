@@ -24,10 +24,3 @@ async def upsert_chat(session: AsyncSession, payload: ChatUpsert) -> ChatRow:
         await session.flush()
     await session.refresh(row)
     return ChatRow.model_validate(row)
-
-
-async def get_chat_internal_id(session: AsyncSession, telegram_chat_id: int) -> int | None:
-    cid = await session.scalar(
-        select(TelegramChat.id).where(TelegramChat.telegram_chat_id == telegram_chat_id)
-    )
-    return int(cid) if cid is not None else None

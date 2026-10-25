@@ -7,3 +7,11 @@ class MessageTrackScope(StrEnum):
     procedures = "procedures"
     positions = "positions"
     welcome = "welcome"
+
+
+class StartResult(StrEnum):
+    """Outcome of recording /start for one Telegram user."""
+
+    created = "created"
+    updated = "updated"
+    banned = "banned"

@@ -14,3 +14,10 @@ plans/
 
 # Local SQLite (optional file DB; see DATABASE_URL)
 data/
+
+# Local research folder (notes, price list, secrets, caches). Not product docs.
+*.env
+docs/research/
+
+# Embedding cache. Recomputed from the price list, not committed.
+matching/cache/

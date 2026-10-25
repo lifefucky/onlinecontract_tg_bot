@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool, StaticPool
 
 from db.base import Base
-from misc.db_url import get_database_url, is_in_memory_sqlite
+from misc.db_url import get_database_url, is_in_memory_sqlite, sqlite_file_path
 
 _engine: AsyncEngine | None = None
 _session_maker: async_sessionmaker[AsyncSession] | None = None
@@ -75,13 +75,17 @@ async def init_db_schema(engine: AsyncEngine | None = None) -> None:
     """
     Ensure schema exists: create_all for in-memory SQLite; Alembic upgrade for file DB.
     """
+    import db.models  # noqa: F401  # register tables on Base.metadata
+
     eng = engine or get_engine()
     url = str(eng.url)
     if is_in_memory_sqlite(url):
         async with eng.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
     else:
-        Path("data").mkdir(parents=True, exist_ok=True)
+        db_file = sqlite_file_path(get_database_url())
+        if db_file is not None:
+            db_file.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(run_alembic_upgrade_sync)
 
 

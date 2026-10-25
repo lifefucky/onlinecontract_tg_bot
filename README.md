@@ -18,7 +18,7 @@ Telegram-бот на **aiogram 3.x** показывает пользовател
 
 ## 3. Архитектура решения
 
-**Вкратце:** `bot.py` — точка входа: `Dispatcher`, middleware с одной сессией БД на update, обработчики команд и callback. Ответы API кэшируются в SQLite; тексты карточек формируются в `utils/` (в т.ч. `beautiful_msg`). Клиент к `api.onlc.ru` — класс `OnlineContract` в `fetch_modules/online_trade.py`.
+**Вкратце:** `bot.py` — точка входа: `Dispatcher`, middleware с одной сессией БД на update, обработчики команд и callback. Ответы API кэшируются в SQLite; тексты карточек формируются в `utils/` (в т.ч. `beautiful_msg`). Клиент к `api.onlc.ru` — класс `OnlineContract` в `fetch_modules/online_trade.py`. Рядом работают запрет закрытого доступа (`access.py`), команды владельца (`bot_admin.py`), сброс диалога (`dialogs.py`), снимок базы (`backups.py`) и рассылка пересечений с прайсом (`intersection_feed.py`).
 
 Подробнее: [`docs/architecture.md`](docs/architecture.md), схема БД: [`docs/database.md`](docs/database.md).
 
@@ -53,7 +53,17 @@ flowchart LR
    export TOKEN="ваш_токен"
    ```
 
-4. Опционально укажите `DATABASE_URL` для файловой БД (по умолчанию — in-memory; см. комментарии в [`example.env`](example.env)).
+4. В [`.env`](.env) задайте файловую базу, свой числовой Telegram id и период отправки файла базы (шаблон — [`example.env`](example.env)). Корневой `.env` читается при старте:
+
+   ```bash
+   DATABASE_URL=sqlite+aiosqlite:///./data/app.db
+   ADMIN_IDS=123456789
+   DB_BACKUP_INTERVAL_HOURS=24
+   DB_BACKUP_ON_START=0
+   MATCH_POLL_INTERVAL_MINUTES=15
+   ```
+
+   Без `DATABASE_URL` база в памяти: журнал не переживёт перезапуск, и файл базы не отправляется. Id можно узнать у [@userinfobot](https://t.me/userinfobot). Раз в указанное число часов владельцу приходит снимок SQLite, если с прошлой копии база изменилась. Срок хранится в базе, поэтому перезапуск сам по себе файл не присылает. `DB_BACKUP_ON_START=1` отправляет копию при старте, когда интервал уже вышел. Раз в `MATCH_POLL_INTERVAL_MINUTES` минут бот ищет новые конкурсные листы. Пересечение с прайсом уходит тем, кто нажал `/start` и не закрыт, и id из `ADMIN_IDS`, которых ещё нет в журнале.
 
 5. Запустите бота из корня репозитория:
 
@@ -81,6 +91,7 @@ pytest
 1. Запустите бота с реальным `TOKEN` (`python bot.py`).
 2. В чате: `/start` — кнопки категорий; выбор категории — карточки; при большом списке — «Показать ещё»; кнопка позиций — конкурсный лист (при длинном тексте возможно несколько сообщений).
 3. При недоступности API бот должен отвечать сообщением об ошибке, а не падать.
+4. Владелец (`ADMIN_IDS`, личный чат): `/stats`, `/users`, `/user <id>`, `/ban`, `/unban`, `/reset <id>`, `/delete_user`. После `/ban` или подтверждённого `/delete_user` повторный `/start` отвечает «доступ закрыт». Пересечения с прайсом приходят сами, отдельной команды нет.
 
 ---
 
