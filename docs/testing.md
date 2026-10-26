@@ -5,7 +5,7 @@
 Из корня репозитория:
 
 ```bash
-pip install -r requirements.txt -r requirements-dev.txt
+pip install -r requirements.txt
 pytest
 ```
 
@@ -25,9 +25,7 @@ pytest
 | `test_intersection.py` | Хэш состава листа, отбор новых id, интервал опроса, текст карточки, журнал `shown_procedures` (повтор только по id процедуры), снимок id, уведомления об ошибках опроса |
 | `test_matching.py` | Категории прайса, соседние позиции, уровень «подходит» / «пограничный», возраст прайса, кэш эмбеддингов без запроса к модели, метки владельца |
 
-Настройки: [`pytest.ini`](../pytest.ini). Dev-зависимости: [`requirements-dev.txt`](../requirements-dev.txt).
-
-На некоторых macOS с системным Python и LibreSSL urllib3 может выводить `NotOpenSSLWarning`; в `pytest.ini` оно отфильтровано, на работу тестов это не влияет. Обновить OpenSSL/Python или использовать venv с актуальным OpenSSL — по желанию.
+Настройки: [`pytest.ini`](../pytest.ini). Pytest входит в [`requirements.txt`](../requirements.txt). Запускайте его из окружения на Python 3.11.
 
 ## Ручная проверка (регрессия в Telegram)
 

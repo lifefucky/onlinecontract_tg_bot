@@ -1,15 +1,19 @@
-# Aiogram 3.x pulls aiohttp; use Python 3.10–3.12 for reliable wheels (3.14 may need newer aiogram/aiohttp).
+# Python 3.11. aiohttp, greenlet and Mako are pulled in by the packages below.
 aiogram==3.27.0
 
-# DB: async SQLAlchemy + SQLite; Pydantic for API/schemas; Alembic for migrations
+# Database, settings and migrations
 sqlalchemy[asyncio]>=2.0,<3
 aiosqlite>=0.20,<1
 alembic>=1.13,<2
 pydantic>=2,<3
 python-dotenv>=1.0,<2
 
-# Price-list matching (package matching/), also used by the bot feed
-xlrd>=2.0.1
+# Price list and embeddings
+xlrd>=2.0.1,<3
 openai>=1.40,<2
 httpx>=0.27,<1
-numpy>=1.26
+numpy>=1.26,<3
+
+# Tests
+pytest>=8.0,<9
+pytest-asyncio>=0.24,<1

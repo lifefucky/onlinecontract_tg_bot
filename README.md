@@ -8,13 +8,13 @@ Telegram-бот на **aiogram 3.x** показывает пользовател
 
 | Область | Технологии |
 |--------|------------|
-| Язык | Python **3.10–3.12** (рекомендуется для стабильных wheels у aiogram/aiohttp) |
+| Язык | Python **3.11** |
 | Telegram | **aiogram** 3.x, HTML parse mode |
 | HTTP к API площадки | **httpx** (вызовы из asyncio через `asyncio.to_thread`) |
 | БД | **SQLite**, **SQLAlchemy** 2.x (async), **aiosqlite**, **Pydantic** 2.x |
 | Миграции | **Alembic** (схема поднимается при старте через `init_db_schema`) |
 
-Зависимости: [`requirements.txt`](requirements.txt). Для разработки и тестов дополнительно: [`requirements-dev.txt`](requirements-dev.txt).
+Зависимости, включая pytest: [`requirements.txt`](requirements.txt).
 
 ## 3. Архитектура решения
 
@@ -42,7 +42,7 @@ flowchart LR
 2. Создайте виртуальное окружение (по желанию) и установите зависимости:
 
    ```bash
-   python3 -m venv .venv
+   python3.11 -m venv .venv
    source .venv/bin/activate   # Windows: .venv\Scripts\activate
    pip install -r requirements.txt
    ```
@@ -75,10 +75,10 @@ flowchart LR
 
 ### Автотесты (pytest)
 
-Установите dev-зависимости и запустите тесты:
+Установите зависимости и запустите тесты:
 
 ```bash
-pip install -r requirements.txt -r requirements-dev.txt
+pip install -r requirements.txt
 pytest
 ```
 
