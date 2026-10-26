@@ -45,3 +45,12 @@ async def set_json(session: AsyncSession, key: str, value: object) -> None:
     else:
         row.value_json = payload
     await session.flush()
+
+
+async def delete_key(session: AsyncSession, key: str) -> None:
+    """Remove ``key`` when it exists. Absent keys are left alone."""
+    row = await session.get(AppKvStore, key)
+    if row is None:
+        return
+    await session.delete(row)
+    await session.flush()

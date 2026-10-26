@@ -1,10 +1,14 @@
-"""Owner commands: list, stats, ban, unban, dialog reset, profile deletion."""
+"""Owner commands: list, stats, ban, unban, dialog reset, profile deletion, shared price upload."""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import secrets
 from datetime import datetime, timezone
 from html import escape
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import BaseFilter, Command, CommandObject
@@ -18,11 +22,28 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.repositories import labels, users
+from db.repositories import kv, labels, users
 from db.schemas.user import UserPage, UserRow, UserStats
+from jobs.embed_lock import catalog_embed_lock
+from matching.catalog import (
+    PRICE_PENDING_KEY,
+    PRICE_UPLOAD_KEY,
+    find_price_xls,
+    load_catalog,
+    pending_price_path,
+    price_count_dropped_sharply,
+    price_list_destination,
+    replace_price_file,
+)
 from misc.admins import get_admin_ids, parse_id_and_reason
 from tgbot.dialogs import interrupt_dialog
-from tgbot.ui.callbacks import parse_delete_user_callback, parse_match_feedback, parse_users_page
+from tgbot.ui.callbacks import (
+    parse_delete_user_callback,
+    parse_match_feedback,
+    parse_price_embed_callback,
+    parse_price_upload_callback,
+    parse_users_page,
+)
 
 USERS_PAGE_SIZE = 8
 
@@ -39,9 +60,18 @@ ADMIN_COMMANDS = [
     BotCommand(command="unban", description="Снова открыть доступ"),
     BotCommand(command="reset", description="Сбросить диалог"),
     BotCommand(command="delete_user", description="Удалить профиль и закрыть доступ"),
+    BotCommand(command="price", description="Загрузить прайс (.xls)"),
 ]
 
 router = Router(name="admin")
+
+# Telegram getFile limit. Larger documents are rejected before the download.
+MAX_PRICE_UPLOAD_BYTES = 20 * 1024 * 1024
+# One pending workbook at a time. A newer upload replaces the token.
+_price_slot_lock = asyncio.Lock()
+# Set while this process has claimed «Посчитать», including the wait for the shared lock.
+_embed_gate = asyncio.Lock()
+_embed_running = False
 
 
 class AdminActor(BaseFilter):
@@ -67,7 +97,8 @@ def admin_help_text() -> str:
         "• /ban &lt;id&gt; [причина] — закрыть доступ.\n"
         "• /unban &lt;id&gt; — открыть доступ.\n"
         "• /reset &lt;id&gt; — сбросить диалог, доступ оставить.\n"
-        "• /delete_user &lt;id&gt; — стереть профиль и закрыть доступ."
+        "• /delete_user &lt;id&gt; — стереть профиль и закрыть доступ.\n"
+        "• /price — загрузить общий прайс (.xls)."
     )
 
 
@@ -364,3 +395,345 @@ async def on_delete_user(query: CallbackQuery, session: AsyncSession, bot: Bot) 
             logging.debug("delete confirm edit failed", exc_info=True)
     if query.from_user is not None:
         await query.bot.send_message(query.from_user.id, text)
+
+
+def _xls_filename(name: str | None) -> bool:
+    if name is None:
+        return False
+    cleaned = name.strip()
+    if not cleaned or "/" in cleaned or "\\" in cleaned or "\x00" in cleaned:
+        return False
+    return Path(cleaned).suffix.lower() == ".xls"
+
+
+def price_document_problem(file_name: str | None, file_size: object) -> str | None:
+    """Russian rejection for a document that must not be downloaded, or None when it may be."""
+    if not _xls_filename(file_name):
+        return "Нужен файл .xls (Excel 97–2003). Файл .xlsx не подходит."
+    if isinstance(file_size, bool) or not isinstance(file_size, int) or file_size < 0:
+        return "Не вижу размер файла."
+    if file_size > MAX_PRICE_UPLOAD_BYTES:
+        return "Файл больше 20 МБ. Такой прайс бот не скачивает."
+    return None
+
+
+def format_price_prompt(
+    original_name: str,
+    new_count: int,
+    previous_count: int | None,
+    *,
+    unreadable_current: bool = False,
+) -> str:
+    """Confirmation text. The filename is escaped because the bot parse mode is HTML."""
+    lines = [
+        f"Заменить общий прайс на <b>{escape(original_name)}</b>?",
+        f"Позиций в новом файле: {new_count}.",
+    ]
+    if previous_count is not None:
+        lines.append(f"Сейчас в прайсе: {previous_count}.")
+        if price_count_dropped_sharply(previous_count, new_count):
+            lines.append("В новом файле сильно меньше позиций.")
+    elif unreadable_current:
+        lines.append("Текущий прайс есть, но позиции не прочитались.")
+    return "\n".join(lines)
+
+
+def _price_keyboard(token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Заменить", callback_data=f"pp|{token}|ok"),
+                InlineKeyboardButton(text="Отмена", callback_data=f"pp|{token}|x"),
+            ]
+        ]
+    )
+
+
+def _embed_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Посчитать", callback_data="pe|1")]]
+    )
+
+
+def _remove_file(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        logging.warning("price file remove failed")
+
+
+def _sku_count_or_reject(path: Path) -> int:
+    count = len(load_catalog(str(path)))
+    if count < 1:
+        raise ValueError("empty price catalog")
+    return count
+
+
+def _live_catalog_count() -> tuple[bool, int | None]:
+    """Whether a live file exists, and its SKU count when the workbook parses."""
+    try:
+        path = find_price_xls()
+    except FileNotFoundError:
+        return False, None
+    try:
+        return True, len(load_catalog(path))
+    except Exception as exc:
+        logging.warning("current price was not counted: %s", type(exc).__name__)
+        return True, None
+
+
+def count_missing_catalog_names() -> int:
+    """How many live catalog names are absent from the embedding cache. Does not call the model."""
+    from matching.embeddings import Embedder
+
+    names = [sku.name for sku in load_catalog()]
+    return len(Embedder().missing(names))
+
+
+def embed_live_catalog() -> int:
+    """Embed live catalog names that are not cached. Returns how many new texts were stored."""
+    from matching.embeddings import Embedder, embed_catalog
+
+    names = [sku.name for sku in load_catalog()]
+    embedder = Embedder()
+    embed_catalog(embedder, names, allow_large=True)
+    return embedder.new_texts
+
+
+def _pending_record(payload: object, token: str) -> dict | None:
+    """The stored upload when ``token`` is current and the record has the expected fields."""
+    if not isinstance(payload, dict) or payload.get("token") != token:
+        return None
+    original = payload.get("original_name")
+    new_count = payload.get("new_count")
+    user_id = payload.get("telegram_user_id")
+    previous = payload.get("previous_count")
+    if not isinstance(original, str) or not original:
+        return None
+    if isinstance(new_count, bool) or not isinstance(new_count, int) or new_count < 1:
+        return None
+    if isinstance(user_id, bool) or not isinstance(user_id, int):
+        return None
+    if previous is not None and (isinstance(previous, bool) or not isinstance(previous, int)):
+        return None
+    return payload
+
+
+async def _edit_query(
+    query: CallbackQuery,
+    bot: Bot,
+    text: str,
+    markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    if query.message is not None:
+        try:
+            await query.message.edit_text(text, reply_markup=markup)
+            return
+        except Exception:
+            logging.debug("price message edit failed")
+    if query.from_user is not None:
+        await bot.send_message(query.from_user.id, text, reply_markup=markup)
+
+
+async def _notify_price_replaced(bot: Bot, uploader_id: int, new_count: int) -> None:
+    """Tell the other owners. A failed send does not roll back the file."""
+    text = f"Прайс заменён. Позиций: {new_count}. Загрузил id {uploader_id}."
+    try:
+        admin_ids = sorted(get_admin_ids())
+    except Exception as exc:
+        logging.warning("price notice skipped: %s", type(exc).__name__)
+        return
+    for admin_id in admin_ids:
+        if admin_id == uploader_id:
+            continue
+        try:
+            await bot.send_message(admin_id, text)
+        except Exception as exc:
+            logging.warning("price notice failed chat=%s (%s)", admin_id, type(exc).__name__)
+
+
+async def _claim_embed() -> bool:
+    """False when an embed is already claimed or the shared cache lock is held."""
+    global _embed_running
+    async with _embed_gate:
+        if _embed_running or catalog_embed_lock.locked():
+            return False
+        _embed_running = True
+        return True
+
+
+async def _release_embed() -> None:
+    global _embed_running
+    async with _embed_gate:
+        _embed_running = False
+
+
+async def _replaced_message(new_count: int) -> tuple[str, InlineKeyboardMarkup | None]:
+    lines = [f"Прайс заменён. Позиций: {new_count}."]
+    markup: InlineKeyboardMarkup | None = None
+    try:
+        if catalog_embed_lock.locked() or _embed_running:
+            lines.append("Сейчас уже идёт расчёт эмбеддингов.")
+        else:
+            async with catalog_embed_lock:
+                missing = await asyncio.to_thread(count_missing_catalog_names)
+            if missing > 0:
+                lines.append(f"В кэше нет эмбеддингов для {missing} названий.")
+                markup = _embed_keyboard()
+            else:
+                lines.append("Названия уже есть в кэше.")
+    except Exception as exc:
+        logging.warning("price embed cache check failed: %s", type(exc).__name__)
+        lines.append("Не удалось проверить кэш эмбеддингов.")
+        markup = _embed_keyboard()
+    return "\n".join(lines), markup
+
+
+@router.message(Command("price"), AdminActor(), F.document)
+async def cmd_price_document(message: Message, session: AsyncSession, bot: Bot) -> None:
+    """Store one shared workbook and ask before replacing the live file."""
+    document = message.document
+    if document is None or message.from_user is None:
+        return
+    problem = price_document_problem(document.file_name, document.file_size)
+    if problem is not None:
+        await message.answer(problem)
+        return
+    original_name = (document.file_name or "").strip()
+    async with _price_slot_lock:
+        pending = pending_price_path()
+        part = pending.with_name(pending.name + ".part")
+        pending.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            await bot.download(document, destination=part, timeout=120)
+            part.replace(pending)
+        except Exception as exc:
+            _remove_file(part)
+            logging.warning("price download failed: %s", type(exc).__name__)
+            await message.answer("Не удалось скачать файл. Текущий прайс не изменён.")
+            return
+        try:
+            new_count = await asyncio.to_thread(_sku_count_or_reject, pending)
+        except Exception as exc:
+            _remove_file(pending)
+            await kv.delete_key(session, PRICE_PENDING_KEY)
+            logging.warning("price workbook rejected: %s", type(exc).__name__)
+            await message.answer(
+                "Не удалось прочитать прайс. Нужен непустой .xls хотя бы с одной позицией. "
+                "Текущий прайс не изменён."
+            )
+            return
+        exists, previous = await asyncio.to_thread(_live_catalog_count)
+        token = secrets.token_hex(4)
+        await kv.set_json(
+            session,
+            PRICE_PENDING_KEY,
+            {
+                "token": token,
+                "original_name": original_name,
+                "telegram_user_id": message.from_user.id,
+                "new_count": new_count,
+                "previous_count": previous,
+            },
+        )
+        await session.commit()
+        await message.answer(
+            format_price_prompt(
+                original_name,
+                new_count,
+                previous,
+                unreadable_current=exists and previous is None,
+            ),
+            reply_markup=_price_keyboard(token),
+        )
+
+
+@router.message(Command("price"), AdminActor())
+async def cmd_price(message: Message) -> None:
+    await message.answer("Пришлите документ .xls и укажите в подписи команду /price.")
+
+
+@router.callback_query(F.data.startswith("pp|"), AdminActor())
+async def on_price_upload(query: CallbackQuery, session: AsyncSession, bot: Bot) -> None:
+    try:
+        action, token = parse_price_upload_callback(query.data or "")
+    except (ValueError, IndexError):
+        await query.answer("Некорректная кнопка.", show_alert=True)
+        return
+    async with _price_slot_lock:
+        try:
+            payload = await kv.get_json(session, PRICE_PENDING_KEY)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict) and payload.get("token") == token and _pending_record(payload, token) is None:
+            _remove_file(pending_price_path())
+            await kv.delete_key(session, PRICE_PENDING_KEY)
+            await session.commit()
+            await query.answer("Эта загрузка уже неактуальна.", show_alert=True)
+            return
+        pending = _pending_record(payload, token)
+        if pending is None:
+            await query.answer("Эта загрузка уже неактуальна.", show_alert=True)
+            return
+        if action == "x":
+            _remove_file(pending_price_path())
+            await kv.delete_key(session, PRICE_PENDING_KEY)
+            await session.commit()
+            await query.answer("Загрузка отменена.")
+            await _edit_query(query, bot, "Загрузка отменена. Прежний прайс на месте.")
+            return
+        workbook = pending_price_path()
+        if not workbook.is_file():
+            await kv.delete_key(session, PRICE_PENDING_KEY)
+            await session.commit()
+            await query.answer("Эта загрузка уже неактуальна.", show_alert=True)
+            return
+        await query.answer()
+        destination = price_list_destination()
+        try:
+            await asyncio.to_thread(replace_price_file, workbook, destination)
+        except OSError:
+            logging.warning("price replace failed")
+            await _edit_query(query, bot, "Не удалось заменить прайс. Текущий файл не изменён.")
+            return
+        await kv.set_json(
+            session,
+            PRICE_UPLOAD_KEY,
+            {
+                "original_name": pending["original_name"],
+                "uploaded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "telegram_user_id": pending["telegram_user_id"],
+                "path": str(destination),
+            },
+        )
+        await kv.delete_key(session, PRICE_PENDING_KEY)
+        await session.commit()
+        new_count = int(pending["new_count"])
+        uploader_id = int(pending["telegram_user_id"])
+    text, markup = await _replaced_message(new_count)
+    await _edit_query(query, bot, text, markup)
+    await _notify_price_replaced(bot, uploader_id, new_count)
+
+
+@router.callback_query(F.data.startswith("pe|"), AdminActor())
+async def on_price_embed(query: CallbackQuery, bot: Bot) -> None:
+    try:
+        parse_price_embed_callback(query.data or "")
+    except (ValueError, IndexError):
+        await query.answer("Некорректная кнопка.", show_alert=True)
+        return
+    if not await _claim_embed():
+        await query.answer("Расчёт уже выполняется.", show_alert=True)
+        return
+    try:
+        await query.answer()
+        await _edit_query(query, bot, "Считаю эмбеддинги.")
+        async with catalog_embed_lock:
+            added = await asyncio.to_thread(embed_live_catalog)
+    except Exception as exc:
+        logging.warning("price embed failed: %s", type(exc).__name__)
+        await _edit_query(query, bot, "Не удалось посчитать эмбеддинги.")
+        return
+    finally:
+        await _release_embed()
+    await _edit_query(query, bot, f"Посчитано новых названий: {added}.")

@@ -46,3 +46,26 @@ def parse_delete_user_callback(data: str) -> tuple[str, int]:
     if user_id <= 0:
         raise ValueError(user_id)
     return action, user_id
+
+
+def parse_price_upload_callback(data: str) -> tuple[str, str]:
+    """Parse ``pp|<token>|ok`` (replace) or ``pp|<token>|x`` (cancel).
+
+    ``token`` is 8 lowercase hex characters. The whole payload stays under 64 bytes.
+    """
+    kind, token, action = data.split("|", 2)
+    if kind != "pp":
+        raise ValueError(data)
+    if len(token) != 8 or any(char not in "0123456789abcdef" for char in token):
+        raise ValueError(token)
+    if action not in {"ok", "x"}:
+        raise ValueError(action)
+    return action, token
+
+
+def parse_price_embed_callback(data: str) -> str:
+    """Parse ``pe|1``, the owner's button that embeds the live catalog."""
+    kind, flag = data.split("|", 1)
+    if kind != "pe" or flag != "1":
+        raise ValueError(data)
+    return flag

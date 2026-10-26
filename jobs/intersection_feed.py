@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 
 from db.repositories import kv, labels, shown, users
 from db.session import get_session_maker
+from jobs.embed_lock import catalog_embed_lock
 from jobs.match_cards import BUCKET_FIT, BUCKET_TITLE, _card_keyboard, content_hash, format_match_card
 from misc.admins import get_admin_ids
 from misc.load_env import load_project_env
@@ -25,7 +26,9 @@ logger = logging.getLogger(__name__)
 SEEN_PROCEDURES_KEY = "match_active_procedure_ids"
 MATCH_STATE_KEY = "match_poll_state"
 PRICE_WARNED_KEY = "match_price_stale_warned_on"
+PRICE_MISSING_NOTICE_KEY = "match_price_missing_notice"
 CATALOG_EMBED_WARNED_KEY = "match_catalog_embed_warned_on"
+_MISSING_PRICE_TEXT = "Не найден файл прайса. Эта проверка пропущена."
 DEFAULT_MATCH_POLL_INTERVAL_MINUTES = 15.0
 MIN_ACTIVE_LIST_RATIO = 0.5
 SEND_GAP_SECONDS = 1.05
@@ -198,6 +201,124 @@ async def notify_match_admins(bot: Bot, text: str) -> None:
             logger.exception("match poll admin notice failed chat=%s", admin_id)
 
 
+def _missing_notice_rows(payload: object) -> list[dict[str, int]]:
+    """``{chat_id, message_id}`` rows. One row per chat; junk entries are dropped."""
+    if not isinstance(payload, list):
+        return []
+    rows: list[dict[str, int]] = []
+    seen: set[int] = set()
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        chat_id = item.get("chat_id")
+        message_id = item.get("message_id")
+        if isinstance(chat_id, bool) or not isinstance(chat_id, int):
+            continue
+        if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id <= 0:
+            continue
+        if chat_id in seen:
+            continue
+        seen.add(chat_id)
+        rows.append({"chat_id": chat_id, "message_id": message_id})
+    return rows
+
+
+async def _load_missing_price_notices() -> list[dict[str, int]]:
+    maker = get_session_maker()
+    async with maker() as session:
+        try:
+            payload = await kv.get_json(session, PRICE_MISSING_NOTICE_KEY)
+        except json.JSONDecodeError:
+            await kv.delete_key(session, PRICE_MISSING_NOTICE_KEY)
+            await session.commit()
+            return []
+    return _missing_notice_rows(payload)
+
+
+async def _save_missing_price_notices(rows: list[dict[str, int]]) -> None:
+    maker = get_session_maker()
+    async with maker() as session:
+        if rows:
+            await kv.set_json(session, PRICE_MISSING_NOTICE_KEY, rows)
+        else:
+            await kv.delete_key(session, PRICE_MISSING_NOTICE_KEY)
+        await session.commit()
+
+
+async def _notify_missing_price(bot: Bot) -> None:
+    """Post the missing-price note once per admin for this outage.
+
+    A chat that already has a stored message is not notified again. A failed
+    send is retried on a later poll. The messages are not tracked for ``/start``.
+    """
+    try:
+        admin_ids = sorted(get_admin_ids())
+    except Exception:
+        logger.exception("match poll missing price notice skipped: ADMIN_IDS is unreadable")
+        return
+    try:
+        stored = await _load_missing_price_notices()
+    except Exception:
+        logger.exception("match poll missing price notice was not read")
+        return
+    known = {row["chat_id"] for row in stored}
+    fresh = list(stored)
+    notice = f"⚠️ {_MISSING_PRICE_TEXT}"
+    for admin_id in admin_ids:
+        if admin_id in known:
+            continue
+        try:
+            message = await bot.send_message(admin_id, notice)
+        except Exception as exc:
+            logger.warning(
+                "missing price notice failed chat=%s (%s)",
+                admin_id,
+                type(exc).__name__,
+            )
+            continue
+        message_id = getattr(message, "message_id", None)
+        if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id <= 0:
+            logger.warning("missing price notice has no message id chat=%s", admin_id)
+            continue
+        fresh.append({"chat_id": admin_id, "message_id": message_id})
+        known.add(admin_id)
+    if fresh == stored:
+        return
+    try:
+        await _save_missing_price_notices(fresh)
+    except Exception:
+        logger.exception("match poll missing price notice was not saved")
+
+
+async def _drop_missing_price_notice(bot: Bot) -> None:
+    """Delete the missing-price notes once the file is back, then forget them.
+
+    A failed delete is logged and does not keep the key. The poll continues,
+    and a finished outage is not posted again.
+    """
+    try:
+        stored = await _load_missing_price_notices()
+    except Exception:
+        logger.exception("match poll missing price notice was not read")
+        return
+    if not stored:
+        return
+    for row in stored:
+        try:
+            await bot.delete_message(chat_id=row["chat_id"], message_id=row["message_id"])
+        except Exception as exc:
+            logger.warning(
+                "missing price notice delete failed chat=%s message=%s (%s)",
+                row["chat_id"],
+                row["message_id"],
+                type(exc).__name__,
+            )
+    try:
+        await _save_missing_price_notices([])
+    except Exception:
+        logger.exception("match poll missing price notice key was not cleared")
+
+
 def _cached_procedure_ids() -> set[int] | None:
     from matching.tenders import cached_procedure_ids
 
@@ -247,11 +368,15 @@ def _live_match_state() -> tuple[str, str]:
     return price_fingerprint(path), rules_version()
 
 
-def _stale_price_text() -> str | None:
+def _stale_price_text(upload: object | None = None) -> str | None:
     from matching.catalog import find_price_xls, stale_price_warning
     from matching.config import PRICE_MAX_AGE_DAYS
 
-    return stale_price_warning(find_price_xls(), max_age_days=PRICE_MAX_AGE_DAYS)
+    return stale_price_warning(
+        find_price_xls(),
+        max_age_days=PRICE_MAX_AGE_DAYS,
+        upload=upload,
+    )
 
 
 async def load_seen_procedure_ids(session) -> set[int] | None:
@@ -324,10 +449,30 @@ async def _notify_once_today(bot: Bot, key: str, text: str) -> None:
     await notify_match_admins(bot, text)
 
 
+async def _read_price_upload() -> object | None:
+    from matching.catalog import PRICE_UPLOAD_KEY
+
+    maker = get_session_maker()
+    async with maker() as session:
+        try:
+            return await kv.get_json(session, PRICE_UPLOAD_KEY)
+        except json.JSONDecodeError:
+            return None
+
+
 async def _warn_stale_price(bot: Bot) -> None:
-    """Tell owners, at most once a day, when the price file is older than the configured age."""
+    """Tell owners, at most once a day, when the price file is older than the configured age.
+
+    A ``price_upload`` record that names the live file supplies the day from the
+    original filename. A missing or mismatched record keeps the file's own day.
+    """
+    upload = None
     try:
-        warning = await asyncio.to_thread(_stale_price_text)
+        upload = await _read_price_upload()
+    except Exception:
+        logger.exception("price upload record was not read")
+    try:
+        warning = await asyncio.to_thread(_stale_price_text, upload)
     except FileNotFoundError:
         return
     if not warning:
@@ -462,12 +607,13 @@ async def poll_new_matches(bot: Bot) -> int:
     try:
         fingerprint, rules = await asyncio.to_thread(_live_match_state)
     except FileNotFoundError:
-        await notify_match_admins(bot, "Не найден файл прайса. Эта проверка пропущена.")
+        await _notify_missing_price(bot)
         return 0
     except Exception:
         logger.exception("match poll price state failed")
         await notify_match_admins(bot, "Не удалось прочитать прайс. Эта проверка пропущена.")
         return 0
+    await _drop_missing_price_notice(bot)
     stored_fp, stored_rules = await _read_match_state()
     rematch = should_rematch_all(
         stored_fp,
@@ -524,7 +670,9 @@ async def poll_new_matches(bot: Bot) -> int:
         [int(row["id"]) for row in fresh],
     )
     try:
-        fit, borderline, position_errors = await asyncio.to_thread(_match_procedures, fresh)
+        # Same lock as the owner's «Посчитать» button: that call rewrites the embedding cache.
+        async with catalog_embed_lock:
+            fit, borderline, position_errors = await asyncio.to_thread(_match_procedures, fresh)
     except (Exception, SystemExit) as exc:
         logger.exception("match poll failed while matching")
         from matching.errors import CatalogEmbedRequired

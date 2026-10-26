@@ -9,7 +9,7 @@
 | [`__init__.py`](../tgbot/ui/__init__.py) | Собирает публичный API пакета: функции из **`messages`**, **`onlc_text_and_data`** из **`keyboards`**. |
 | [`messages.py`](../tgbot/ui/messages.py) | Форматирование карточек процедуры и конкурсного листа позиций; разбиение текста на части по лимиту Telegram. |
 | [`keyboards.py`](../tgbot/ui/keyboards.py) | Кортеж **`onlc_text_and_data`**: подпись кнопки → **`callback_data`** (строка с id категорий API через запятую). |
-| [`callbacks.py`](../tgbot/ui/callbacks.py) | Разбор **`m|<offset>|<cat_str>`** для кнопки «Показать ещё», **`au|<offset>`** для списка пользователей, **`adel` / `adelx`** для подтверждения удаления и **`mf|<id>|1|…` / `mf|<id>|0|…`** для «Подходит» / «Не подходит». |
+| [`callbacks.py`](../tgbot/ui/callbacks.py) | Разбор **`m|<offset>|<cat_str>`** для кнопки «Показать ещё», **`au|<offset>`** для списка пользователей, **`adel` / `adelx`** для подтверждения удаления, **`mf|<id>|1|…` / `mf|<id>|0|…`** для «Подходит» / «Не подходит», **`pp|<token>|ok` / `pp|<token>|x`** для замены прайса и **`pe|1`** для «Посчитать». |
 
 ## Реализация
 

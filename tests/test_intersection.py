@@ -914,3 +914,143 @@ async def test_admin_notice_failure_is_not_retried(monkeypatch, caplog):
         await notify_match_admins(bot, "Не удалось получить список конкурсных листов.")
     assert bot.calls == 0
     assert "ADMIN_IDS is unreadable" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_poll_classify_holds_the_catalog_lock(monkeypatch):
+    monkeypatch.setenv("ADMIN_IDS", "10")
+    seen = {}
+
+    def load(_stored):
+        return [{"id": 9}], {1, 9}
+
+    def match(_procedures):
+        seen["locked"] = intersection_feed.catalog_embed_lock.locked()
+        return [], [], set()
+
+    _patch_poll(monkeypatch, stored={1}, load=load, match=match)
+    assert await poll_new_matches(RecordingBot()) == 0
+    assert seen["locked"] is True
+    assert intersection_feed.catalog_embed_lock.locked() is False
+
+
+def test_stale_price_text_forwards_the_upload(monkeypatch):
+    import matching.catalog as catalog
+
+    captured = {}
+
+    def warn(path, *, max_age_days, upload=None, today=None):
+        captured["path"] = path
+        captured["upload"] = upload
+        captured["max_age_days"] = max_age_days
+        return "note"
+
+    monkeypatch.setattr(catalog, "find_price_xls", lambda: "/data/price-list.xls")
+    monkeypatch.setattr(catalog, "stale_price_warning", warn)
+    upload = {"path": "/data/price-list.xls", "original_name": "Прайс 26.04.2026.xls"}
+    assert intersection_feed._stale_price_text(upload) == "note"
+    assert captured["upload"] is upload
+    assert captured["path"] == "/data/price-list.xls"
+    assert captured["max_age_days"] > 0
+
+
+@pytest.mark.asyncio
+async def test_warn_stale_price_reads_price_upload(monkeypatch):
+    from matching.catalog import PRICE_UPLOAD_KEY
+
+    maker = get_session_maker()
+    async with maker() as session:
+        await kv.set_json(
+            session,
+            PRICE_UPLOAD_KEY,
+            {"path": "/data/price-list.xls", "original_name": "26.04.2026.xls"},
+        )
+        await session.commit()
+    seen = {}
+
+    def fake(upload=None):
+        seen["upload"] = upload
+        return None
+
+    monkeypatch.setattr(intersection_feed, "_stale_price_text", fake)
+    await intersection_feed._warn_stale_price(RecordingBot())
+    assert seen["upload"]["original_name"] == "26.04.2026.xls"
+
+
+class _MissingPriceBot:
+    def __init__(self):
+        self.sent: list[tuple[int, str]] = []
+        self.deleted: list[tuple[int, int]] = []
+        self.fail_send: set[int] = set()
+        self.fail_delete = False
+        self._next = 100
+
+    async def send_message(self, chat_id, text, reply_markup=None):
+        if int(chat_id) in self.fail_send:
+            raise RuntimeError("blocked")
+        self._next += 1
+        self.sent.append((int(chat_id), text))
+        return type("Sent", (), {"message_id": self._next})()
+
+    async def delete_message(self, chat_id, message_id):
+        self.deleted.append((int(chat_id), int(message_id)))
+        if self.fail_delete:
+            raise RuntimeError("too old")
+
+
+async def _missing_notice_rows():
+    maker = get_session_maker()
+    async with maker() as session:
+        return await kv.get_json(session, intersection_feed.PRICE_MISSING_NOTICE_KEY)
+
+
+@pytest.mark.asyncio
+async def test_missing_price_notice_posts_once_and_deletes_when_the_file_returns(monkeypatch):
+    monkeypatch.setenv("ADMIN_IDS", "10,20")
+
+    def load(_seen):
+        return [], {1}
+
+    saved = _patch_poll(monkeypatch, stored={1}, load=load)
+
+    def missing():
+        raise FileNotFoundError("price")
+
+    monkeypatch.setattr(intersection_feed, "_live_match_state", missing)
+    bot = _MissingPriceBot()
+    bot.fail_send = {20}
+    assert await poll_new_matches(bot) == 0
+    assert [chat for chat, text in bot.sent] == [10]
+    assert "Не найден файл прайса" in bot.sent[0][1]
+    assert await _missing_notice_rows() == [{"chat_id": 10, "message_id": 101}]
+
+    bot.fail_send = set()
+    assert await poll_new_matches(bot) == 0
+    assert [chat for chat, _text in bot.sent] == [10, 20]
+    assert await _missing_notice_rows() == [
+        {"chat_id": 10, "message_id": 101},
+        {"chat_id": 20, "message_id": 102},
+    ]
+    assert await poll_new_matches(bot) == 0
+    assert len(bot.sent) == 2
+
+    monkeypatch.setattr(intersection_feed, "_live_match_state", lambda: ("same", "same"))
+    assert await poll_new_matches(bot) == 0
+    assert bot.deleted == [(10, 101), (20, 102)]
+    assert await _missing_notice_rows() is None
+    assert saved == [{1}]
+
+    monkeypatch.setattr(intersection_feed, "_live_match_state", missing)
+    bot.sent.clear()
+    bot.deleted.clear()
+    assert await poll_new_matches(bot) == 0
+    assert [chat for chat, _text in bot.sent] == [10, 20]
+    assert await poll_new_matches(bot) == 0
+    assert len(bot.sent) == 2
+
+    monkeypatch.setattr(intersection_feed, "_live_match_state", lambda: ("same", "same"))
+    bot.fail_delete = True
+    assert await poll_new_matches(bot) == 0
+    assert bot.deleted == [(10, 103), (20, 104)]
+    assert await _missing_notice_rows() is None
+    assert saved == [{1}, {1}]

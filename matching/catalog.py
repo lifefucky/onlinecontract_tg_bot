@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
+import logging
 import os
 import re
+import shutil
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
+from html import escape
 from pathlib import Path
 
 import xlrd
@@ -48,6 +52,14 @@ _HEADER_EXACT = {
 
 _DATE_RE = re.compile(r"(?<!\d)(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?(?!\d)")
 
+# ``app_kv_store``: accepted upload. The stored file is ``price-list.xls``, so the
+# age warning reads the day from ``original_name`` (or ``uploaded_at``).
+PRICE_UPLOAD_KEY = "price_upload"
+# ``app_kv_store``: one unconfirmed upload. Cleared by «Заменить» and «Отмена».
+PRICE_PENDING_KEY = "price_pending"
+CANONICAL_PRICE_NAME = "price-list.xls"
+_SKIPPED_PRICE_NAMES = frozenset({"price-list.prev.xls", "price-list.pending.xls"})
+
 
 @dataclass
 class Sku:
@@ -59,15 +71,36 @@ class Sku:
     category: str
 
 
+def _configured_price_path() -> Path | None:
+    """``PRICE_LIST_PATH`` when set: absolute, or relative to the repository root."""
+    raw = os.environ.get("PRICE_LIST_PATH", "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = config.REPO_ROOT / path
+    return path
+
+
 def _pick_xls(directory: Path) -> Path | None:
-    """Largest ``.xls`` in ``directory``. A name containing ``ОПТ`` wins over other files."""
+    """Largest ``.xls`` in ``directory``. A name containing ``ОПТ`` wins over other files.
+
+    ``price-list.prev.xls`` and ``price-list.pending.xls`` are a rollback copy and
+    an unconfirmed upload. The size heuristic must not treat them as the live catalog.
+    """
     if not directory.is_dir():
         return None
     try:
         entries = list(directory.iterdir())
     except OSError:
         return None
-    files = [path for path in entries if path.is_file() and path.suffix.lower() == ".xls"]
+    files = [
+        path
+        for path in entries
+        if path.is_file()
+        and path.suffix.lower() == ".xls"
+        and path.name.casefold() not in _SKIPPED_PRICE_NAMES
+    ]
     preferred = [path for path in files if "ОПТ" in path.name.upper()]
     chosen = preferred or files
     if not chosen:
@@ -77,20 +110,23 @@ def _pick_xls(directory: Path) -> Path | None:
 
 
 def find_price_xls() -> str:
-    """Resolve the price list.
+    """Resolve the shared price list.
 
-    ``PRICE_LIST_PATH`` (absolute or relative to the repository) wins. Otherwise
-    the largest ``.xls`` in ``data/``, preferring a name that contains ``ОПТ``.
-    ``docs/research`` is only a legacy fallback for an existing checkout.
+    ``PRICE_LIST_PATH`` (absolute or relative to the repository) wins, and a
+    missing file still raises. Otherwise ``data/price-list.xls`` when it is a
+    file, else the largest ``.xls`` in ``data/`` (a name containing ``ОПТ``
+    wins). ``docs/research`` is only a legacy fallback for an existing checkout.
     """
-    raw = os.environ.get("PRICE_LIST_PATH", "").strip()
-    if raw:
-        path = Path(raw).expanduser()
-        if not path.is_absolute():
-            path = config.REPO_ROOT / path
-        if not path.is_file():
-            raise FileNotFoundError(f"PRICE_LIST_PATH is set but the file is missing: {path}")
-        return str(path)
+    configured = _configured_price_path()
+    if configured is not None:
+        if not configured.is_file():
+            raise FileNotFoundError(
+                f"PRICE_LIST_PATH is set but the file is missing: {configured}"
+            )
+        return str(configured)
+    canonical = config.DATA_DIR / CANONICAL_PRICE_NAME
+    if canonical.is_file():
+        return str(canonical)
     for directory in (config.DATA_DIR, config.RESEARCH_DIR):
         found = _pick_xls(directory)
         if found is not None:
@@ -98,6 +134,75 @@ def find_price_xls() -> str:
     raise FileNotFoundError(
         "price list xls not found; set PRICE_LIST_PATH or put the file in data/"
     )
+
+
+def price_list_destination() -> Path:
+    """File ``/price`` replaces. It does not have to exist yet.
+
+    A set ``PRICE_LIST_PATH`` is that file. Otherwise ``data/price-list.xls``.
+    The rollback copy is always ``data/price-list.prev.xls``, not a second copy
+    of the canonical name.
+    """
+    return _configured_price_path() or (config.DATA_DIR / CANONICAL_PRICE_NAME)
+
+
+def pending_price_path() -> Path:
+    """Single unconfirmed upload. Never chosen by :func:`find_price_xls`."""
+    return config.DATA_DIR / "price-list.pending.xls"
+
+
+def previous_price_path() -> Path:
+    """Rollback copy of the destination, taken before a confirmed replace."""
+    return config.DATA_DIR / "price-list.prev.xls"
+
+
+def _same_price_path(left: str | Path, right: str | Path) -> bool:
+    a = Path(left)
+    b = Path(right)
+    if a == b:
+        return True
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        return False
+
+
+def replace_price_file(pending: Path, destination: Path) -> None:
+    """Copy ``destination`` to the rollback file when it exists, then move ``pending`` onto it.
+
+    The move is ``os.replace``. Across devices the pending file is copied next
+    to the destination and that copy is renamed into place, so the live file
+    is not truncated if the copy fails.
+    """
+    if not pending.is_file():
+        raise FileNotFoundError(pending)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_file() and not _same_price_path(destination, previous_price_path()):
+        previous = previous_price_path()
+        previous.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(destination, previous)
+    _move_into_place(pending, destination)
+
+
+def _move_into_place(src: Path, dest: Path) -> None:
+    try:
+        os.replace(src, dest)
+        return
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+    temporary = dest.with_name(f".{dest.name}.{os.getpid()}.incoming")
+    try:
+        shutil.copyfile(src, temporary)
+        os.replace(temporary, dest)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    temporary.unlink(missing_ok=True)
+    try:
+        src.unlink()
+    except OSError:
+        logging.warning("price pending remove failed after replace")
 
 
 def price_fingerprint(path: str | Path) -> str:
@@ -109,29 +214,89 @@ def price_fingerprint(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _day_from_name(name: str, today: date) -> date | None:
+    """Day written as ``26.04`` or ``26.04.2026``. A date with no year rolls back if it is still ahead."""
+    match = _DATE_RE.search(name)
+    if not match:
+        return None
+    day_n = int(match.group(1))
+    month_n = int(match.group(2))
+    year_n = int(match.group(3)) if match.group(3) else today.year
+    try:
+        found = date(year_n, month_n, day_n)
+    except ValueError:
+        return None
+    if match.group(3) is None and found > today:
+        try:
+            found = date(year_n - 1, month_n, day_n)
+        except ValueError:
+            return None
+    return found
+
+
 def price_file_day(path: str | Path, *, today: date | None = None) -> date:
     """Date from the filename (``26.04`` or ``26.04.2026``), otherwise the file mtime."""
     today = today or date.today()
-    name = Path(path).name
-    match = _DATE_RE.search(name)
-    if match:
-        day_n = int(match.group(1))
-        month_n = int(match.group(2))
-        year_n = int(match.group(3)) if match.group(3) else today.year
-        try:
-            found = date(year_n, month_n, day_n)
-        except ValueError:
-            found = None
-        if found is not None:
-            if match.group(3) is None and found > today:
-                try:
-                    found = date(year_n - 1, month_n, day_n)
-                except ValueError:
-                    found = None
-            if found is not None:
-                return found
+    found = _day_from_name(Path(path).name, today)
+    if found is not None:
+        return found
     stamp = Path(path).stat().st_mtime
     return datetime.fromtimestamp(stamp).date()
+
+
+def _day_from_timestamp(value: object) -> date | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).date()
+
+
+def price_upload_day(path: str | Path, upload: object | None, *, today: date | None = None) -> date:
+    """Day for the stale warning.
+
+    When ``upload`` is the ``price_upload`` record and its ``path`` is this file,
+    the day comes from ``original_name``. A name with no date uses ``uploaded_at``.
+    A missing record, or a path that does not match, keeps :func:`price_file_day`.
+    """
+    today = today or date.today()
+    if isinstance(upload, dict):
+        stored = upload.get("path")
+        if isinstance(stored, str) and stored and _same_price_path(path, stored):
+            original = upload.get("original_name")
+            if isinstance(original, str):
+                found = _day_from_name(original, today)
+                if found is not None:
+                    return found
+            uploaded = _day_from_timestamp(upload.get("uploaded_at"))
+            if uploaded is not None:
+                return uploaded
+    return price_file_day(path, today=today)
+
+
+def _shown_price_name(path: str | Path, upload: object | None) -> str:
+    name = Path(path).name
+    if isinstance(upload, dict):
+        stored = upload.get("path")
+        original = upload.get("original_name")
+        if (
+            isinstance(stored, str)
+            and isinstance(original, str)
+            and original.strip()
+            and _same_price_path(path, stored)
+        ):
+            name = original.strip()
+    return escape(name)
+
+
+def price_count_dropped_sharply(previous: int, new: int) -> bool:
+    """True when the live catalog is non-empty and the new file has strictly fewer than half its positions."""
+    return previous > 0 and new * 2 < previous
 
 
 def stale_price_warning(
@@ -139,16 +304,21 @@ def stale_price_warning(
     *,
     today: date | None = None,
     max_age_days: int,
+    upload: object | None = None,
 ) -> str | None:
-    """Russian note for owners, or None when the file is still fresh enough."""
+    """Russian note for owners, or None when the file is still fresh enough.
+
+    ``upload`` is the ``price_upload`` record. When it names this file, the day
+    and the shown filename come from the original upload, not from ``price-list.xls``.
+    """
     today = today or date.today()
-    day = price_file_day(path, today=today)
+    day = price_upload_day(path, upload, today=today)
     age = (today - day).days
     if age <= max_age_days:
         return None
     return (
         f"Прайс старше {max_age_days} дней: файл от {day.strftime('%d.%m.%Y')} "
-        f"({Path(path).name}). Сопоставление продолжается."
+        f"({_shown_price_name(path, upload)}). Сопоставление продолжается."
     )
 
 

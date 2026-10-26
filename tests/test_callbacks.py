@@ -6,6 +6,8 @@ from tgbot.ui.callbacks import (
     parse_delete_user_callback,
     parse_match_feedback,
     parse_pagination_callback,
+    parse_price_embed_callback,
+    parse_price_upload_callback,
     parse_users_page,
 )
 
@@ -29,6 +31,22 @@ def test_parse_admin_callbacks():
         parse_users_page("au|-1")
     with pytest.raises(ValueError):
         parse_delete_user_callback("other|1")
+
+
+def test_parse_price_callbacks():
+    assert parse_price_upload_callback("pp|0123abcd|ok") == ("ok", "0123abcd")
+    assert parse_price_upload_callback("pp|0123abcd|x") == ("x", "0123abcd")
+    assert parse_price_embed_callback("pe|1") == "1"
+    assert len(b"pp|0123abcd|ok") < 64
+    assert len(b"pe|1") < 64
+    with pytest.raises(ValueError):
+        parse_price_upload_callback("pp|0123abcd|no")
+    with pytest.raises(ValueError):
+        parse_price_upload_callback("pp|ABCDEF01|ok")
+    with pytest.raises(ValueError):
+        parse_price_upload_callback("adel|1")
+    with pytest.raises(ValueError):
+        parse_price_embed_callback("pe|0")
 
 
 def test_parse_match_feedback():

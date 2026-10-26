@@ -13,7 +13,14 @@ from db.models.match_label import MatchLabel
 from db.repositories import labels
 from db.session import bind_engine, create_async_engine_from_url, get_session_maker, init_db_schema, reset_engine
 from jobs.intersection_feed import select_procedures_to_match, should_rematch_all
-from matching.catalog import price_file_day, price_fingerprint, skus_from_rows, stale_price_warning
+from matching.catalog import (
+    price_count_dropped_sharply,
+    price_file_day,
+    price_fingerprint,
+    price_upload_day,
+    skus_from_rows,
+    stale_price_warning,
+)
 from matching.categories import category_of
 from matching.config import EMBED_BATCH, FIT_MIN_COSINE, PRICE_MAX_AGE_DAYS
 from matching.embeddings import embed_catalog
@@ -90,6 +97,39 @@ def test_price_date_and_stale_warning(tmp_path):
     left.write_bytes(b"one")
     right.write_bytes(b"two")
     assert price_fingerprint(left) != price_fingerprint(right)
+
+
+def test_price_upload_day_prefers_original_name_then_uploaded_at(tmp_path):
+    path = tmp_path / "price-list.xls"
+    path.write_bytes(b"x")
+    stamp = datetime(2026, 10, 20, 12, 0).timestamp()
+    os.utime(path, (stamp, stamp))
+    today = date(2026, 10, 25)
+    upload = {
+        "path": str(path),
+        "original_name": "Прайс 26.04.2026.xls",
+        "uploaded_at": "2026-01-02T00:00:00+00:00",
+    }
+    assert price_upload_day(path, upload, today=today) == date(2026, 4, 26)
+    warning = stale_price_warning(path, today=today, max_age_days=30, upload=upload)
+    assert warning is not None
+    assert "26.04.2026" in warning
+    assert "Прайс 26.04.2026.xls" in warning
+    assert stale_price_warning(path, today=today, max_age_days=30) is None
+
+    undated = dict(upload, original_name="прайс без даты.xls")
+    assert price_upload_day(path, undated, today=today) == date(2026, 1, 2)
+    mismatched = dict(upload, path=str(tmp_path / "other.xls"))
+    assert price_upload_day(path, mismatched, today=today) == date(2026, 10, 20)
+    assert price_upload_day(path, None, today=today) == date(2026, 10, 20)
+
+
+def test_price_count_dropped_sharply():
+    assert price_count_dropped_sharply(10, 4) is True
+    assert price_count_dropped_sharply(10, 5) is False
+    assert price_count_dropped_sharply(0, 0) is False
+    assert price_count_dropped_sharply(0, 1) is False
+    assert price_count_dropped_sharply(1, 0) is True
 
 
 def test_rules_version_tracks_threshold_and_disabled(monkeypatch):
@@ -369,6 +409,9 @@ def test_find_price_xls_resolution_order(tmp_path, monkeypatch):
     (data / "ОПТ-large.xls").write_bytes(b"aaaa")
     (data / "ОПТ-mid.xls").write_bytes(b"aa")
     assert Path(catalog.find_price_xls()).name == "ОПТ-large.xls"
+    (data / "price-list.xls").write_bytes(b"q")
+    assert Path(catalog.find_price_xls()).name == "price-list.xls"
+    (data / "price-list.xls").unlink()
     for path in data.glob("*.xls"):
         path.unlink()
     (data / "plain.xls").write_bytes(b"zz")
@@ -385,11 +428,23 @@ def test_find_price_xls_resolution_order(tmp_path, monkeypatch):
     assert Path(catalog.find_price_xls()).name == "kept.xls"
     (data / "kept.xls").unlink()
 
+    (data / "price-list.pending.xls").write_bytes(b"pending-is-longer")
+    (data / "price-list.prev.xls").write_bytes(b"previous-is-longer")
+    (data / "real.xls").write_bytes(b"z")
+    assert Path(catalog.find_price_xls()).name == "real.xls"
+    (data / "real.xls").unlink()
+    with pytest.raises(FileNotFoundError):
+        catalog.find_price_xls()
+    for path in data.glob("*.xls"):
+        path.unlink()
+
     custom = tmp_path / "custom" / "price.xls"
     custom.parent.mkdir()
     custom.write_bytes(b"z")
+    (data / "price-list.xls").write_bytes(b"canonical-bigger-than-custom")
     monkeypatch.setenv("PRICE_LIST_PATH", "custom/price.xls")
     assert Path(catalog.find_price_xls()) == custom
+    (data / "price-list.xls").unlink()
     monkeypatch.setenv("PRICE_LIST_PATH", str(tmp_path / "missing.xls"))
     with pytest.raises(FileNotFoundError, match="missing.xls"):
         catalog.find_price_xls()
@@ -400,6 +455,60 @@ def test_find_price_xls_resolution_order(tmp_path, monkeypatch):
     message = str(exc.value)
     assert "data/" in message
     assert "docs/research" not in message
+
+
+def test_replace_price_file_keeps_destination_when_rename_fails(tmp_path, monkeypatch):
+    import errno
+
+    import matching.catalog as catalog
+    import matching.config as config
+
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setattr(config, "DATA_DIR", data)
+    dest = tmp_path / "custom" / "price.xls"
+    dest.parent.mkdir()
+    dest.write_bytes(b"old-live")
+    pending = data / "price-list.pending.xls"
+    pending.write_bytes(b"new-live")
+
+    def boom(_src, _dst):
+        raise OSError("disk")
+
+    monkeypatch.setattr(catalog.os, "replace", boom)
+    with pytest.raises(OSError, match="disk"):
+        catalog.replace_price_file(pending, dest)
+    assert dest.read_bytes() == b"old-live"
+    assert pending.read_bytes() == b"new-live"
+    assert (data / "price-list.prev.xls").read_bytes() == b"old-live"
+
+
+def test_replace_price_file_copies_across_devices(tmp_path, monkeypatch):
+    import errno
+
+    import matching.catalog as catalog
+    import matching.config as config
+
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setattr(config, "DATA_DIR", data)
+    dest = tmp_path / "custom" / "price.xls"
+    dest.parent.mkdir()
+    dest.write_bytes(b"old-live")
+    pending = data / "price-list.pending.xls"
+    pending.write_bytes(b"new-live")
+    real_replace = os.replace
+
+    def fake_replace(src, dst):
+        if Path(src) == pending:
+            raise OSError(errno.EXDEV, "cross-device")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(catalog.os, "replace", fake_replace)
+    catalog.replace_price_file(pending, dest)
+    assert dest.read_bytes() == b"new-live"
+    assert not pending.exists()
+    assert (data / "price-list.prev.xls").read_bytes() == b"old-live"
 
 
 def test_score_owner_labels_does_not_move_the_threshold():
