@@ -149,7 +149,8 @@ async def _send(session, bot: FakeBot, name: str, size: int | None):
 async def test_bare_price_asks_for_a_document():
     message = FakeMessage(FakeBot(), document=None)
     await admin.cmd_price(message)
-    assert message.answers == [("Пришлите документ .xls и укажите в подписи команду /price.", None)]
+    text = message.answers[0][0]
+    assert "Пришлите документ .xls и укажите в подписи команду /price." in text
 
 
 async def test_reject_non_xls_and_oversize_before_download(session, price_dir):

@@ -684,7 +684,18 @@ async def cmd_price_document(message: Message, session: AsyncSession, bot: Bot) 
 
 @router.message(Command("price"), AdminActor())
 async def cmd_price(message: Message) -> None:
-    await message.answer("Пришлите документ .xls и укажите в подписи команду /price.")
+    """Show whether a shared price file is present, then remind how to upload it."""
+    exists, previous = await asyncio.to_thread(_live_catalog_count)
+    if not exists:
+        await message.answer("Прайс ещё не загружен. Пришлите документ .xls и укажите в подписи команду /price.")
+        return
+    lines: list[str] = []
+    if previous is None:
+        lines.append("Текущий прайс есть, но позиции не прочитались.")
+    else:
+        lines.append(f"Текущий общий прайс загружен. Позиций в прайсе: {previous}.")
+    lines.append("Чтобы заменить файл, пришлите новый документ .xls и укажите в подписи команду /price.")
+    await message.answer("\n".join(lines))
 
 
 @router.callback_query(F.data.startswith("pp|"), AdminActor())
