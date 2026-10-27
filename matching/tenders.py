@@ -9,29 +9,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from onlinecontract.client import HTTPError, POSITIONS_URL, PROCEDURES_URL, api_client, api_get
-from matching.config import CACHE_DIR, FETCH_TIMEOUT, FETCH_WORKERS, PACKAGE_DIR, RESEARCH_DIR
+from matching.config import CACHE_DIR, FETCH_TIMEOUT, FETCH_WORKERS
 
 logger = logging.getLogger(__name__)
 
 
 def _cached_file(relative: str) -> Path:
-    """Read ``matching/cache`` first. Reuse the legacy research file when it is the one on disk.
+    """File under ``matching/cache`` for procedure and position snapshots.
 
-    New files are still written under ``CACHE_DIR``. A redirected cache (tests) and a
-    missing research directory do not fall through or raise.
+    Runtime code no longer falls back to ``docs/research``; a redirected
+    ``CACHE_DIR`` in tests is honoured as-is.
     """
-    new_path = CACHE_DIR / relative
-    if new_path.is_file():
-        return new_path
-    if CACHE_DIR != PACKAGE_DIR / "cache":
-        return new_path
-    legacy = RESEARCH_DIR / "pipeline" / "cache" / relative
-    try:
-        if legacy.is_file():
-            return legacy
-    except OSError:
-        return new_path
-    return new_path
+    return CACHE_DIR / relative
 
 
 def _procedures_path() -> Path:

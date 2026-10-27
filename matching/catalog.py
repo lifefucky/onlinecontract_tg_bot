@@ -58,7 +58,6 @@ PRICE_UPLOAD_KEY = "price_upload"
 # ``app_kv_store``: one unconfirmed upload. Cleared by «Заменить» and «Отмена».
 PRICE_PENDING_KEY = "price_pending"
 CANONICAL_PRICE_NAME = "price-list.xls"
-_SKIPPED_PRICE_NAMES = frozenset({"price-list.prev.xls", "price-list.pending.xls"})
 
 
 @dataclass
@@ -82,40 +81,12 @@ def _configured_price_path() -> Path | None:
     return path
 
 
-def _pick_xls(directory: Path) -> Path | None:
-    """Largest ``.xls`` in ``directory``. A name containing ``ОПТ`` wins over other files.
-
-    ``price-list.prev.xls`` and ``price-list.pending.xls`` are a rollback copy and
-    an unconfirmed upload. The size heuristic must not treat them as the live catalog.
-    """
-    if not directory.is_dir():
-        return None
-    try:
-        entries = list(directory.iterdir())
-    except OSError:
-        return None
-    files = [
-        path
-        for path in entries
-        if path.is_file()
-        and path.suffix.lower() == ".xls"
-        and path.name.casefold() not in _SKIPPED_PRICE_NAMES
-    ]
-    preferred = [path for path in files if "ОПТ" in path.name.upper()]
-    chosen = preferred or files
-    if not chosen:
-        return None
-    chosen.sort(key=lambda path: path.stat().st_size, reverse=True)
-    return chosen[0]
-
-
 def find_price_xls() -> str:
     """Resolve the shared price list.
 
     ``PRICE_LIST_PATH`` (absolute or relative to the repository) wins, and a
     missing file still raises. Otherwise ``data/price-list.xls`` when it is a
-    file, else the largest ``.xls`` in ``data/`` (a name containing ``ОПТ``
-    wins). ``docs/research`` is only a legacy fallback for an existing checkout.
+    file. Legacy ``docs/research`` notebooks are no longer consulted at runtime.
     """
     configured = _configured_price_path()
     if configured is not None:
@@ -127,12 +98,8 @@ def find_price_xls() -> str:
     canonical = config.DATA_DIR / CANONICAL_PRICE_NAME
     if canonical.is_file():
         return str(canonical)
-    for directory in (config.DATA_DIR, config.RESEARCH_DIR):
-        found = _pick_xls(directory)
-        if found is not None:
-            return str(found)
     raise FileNotFoundError(
-        "price list xls not found; set PRICE_LIST_PATH or put the file in data/"
+        "price list xls not found; set PRICE_LIST_PATH or upload it via /price"
     )
 
 

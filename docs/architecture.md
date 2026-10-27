@@ -8,7 +8,7 @@
 | [`utils.md`](utils.md) | Текст карточек для Telegram, кнопки категорий и разбор `callback_data` (`tgbot/ui`) |
 | [`testing.md`](testing.md) | Запуск pytest и короткая ручная проверка в Telegram |
 
-Прайс-лист один на всех. Если задан `PRICE_LIST_PATH`, читается он. Иначе `data/price-list.xls`, если файл есть; иначе самый большой `.xls` в `data/` (имя с «ОПТ» важнее), иначе устаревший каталог `docs/research/` (в git не входит). `price-list.prev.xls` и `price-list.pending.xls` в этот выбор не попадают. Команда `/price` записывает путь из `PRICE_LIST_PATH` или `data/price-list.xls` и перед заменой копирует прежний файл в `data/price-list.prev.xls`.
+Прайс-лист один на всех. Если задан `PRICE_LIST_PATH`, читается он. Иначе — только `data/price-list.xls`, если файл есть; другие `.xls` и каталог `docs/research/` в выбор не попадают. `price-list.prev.xls` и `price-list.pending.xls` никогда не считаются текущим прайсом. Команда `/price` записывает путь из `PRICE_LIST_PATH` или `data/price-list.xls` и перед заменой копирует прежний файл в `data/price-list.prev.xls`.
 
 Достоверное описание потоков и границ компонентов. Детали реализации — в исходниках и в профильных файлах [`docs/`](.).
 
