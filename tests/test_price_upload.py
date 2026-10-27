@@ -1,5 +1,6 @@
 """Shared price upload: reject a bad workbook, confirm replaces one file, cancel does not."""
 
+import logging
 import os
 import struct
 from types import SimpleNamespace
@@ -309,17 +310,55 @@ async def test_embed_button_reports_new_texts_and_a_busy_lock(monkeypatch):
         catalog_embed_lock.release()
 
 
-async def test_embed_failure_hides_the_exception(monkeypatch):
+async def test_embed_failure_hides_the_exception(monkeypatch, caplog):
     def boom():
         raise RuntimeError("sk-SECRET")
 
     monkeypatch.setattr(admin, "embed_live_catalog", boom)
     edited = FakeEditable()
-    await admin.on_price_embed(FakeQuery("pe|1", FakeBot(), edited), FakeBot())
+    with caplog.at_level(logging.WARNING):
+        await admin.on_price_embed(FakeQuery("pe|1", FakeBot(), edited), FakeBot())
     assert edited.edits[-1][0] == "Не удалось посчитать эмбеддинги."
     assert "SECRET" not in edited.edits[-1][0]
+    assert "SECRET" not in caplog.text
     assert admin._embed_running is False
     assert catalog_embed_lock.locked() is False
+
+
+async def test_embed_failure_explains_a_missing_key_and_a_rejected_request(monkeypatch, caplog):
+    from matching.errors import PipelineError
+
+    def missing_key():
+        raise PipelineError("OPENAI_API_KEY is missing in the project .env")
+
+    monkeypatch.setattr(admin, "embed_live_catalog", missing_key)
+    edited = FakeEditable()
+    with caplog.at_level(logging.WARNING):
+        await admin.on_price_embed(FakeQuery("pe|1", FakeBot(), edited), FakeBot())
+    assert edited.edits[-1][0] == "Не задан ключ OPENAI_API_KEY. Эмбеддинги не посчитаны."
+    assert "OPENAI_API_KEY is missing" in caplog.text
+
+    secret = "sk-live-secret-value"
+    monkeypatch.setattr(config, "OPENAI_API_KEY", secret)
+
+    def rejected():
+        raise PipelineError(
+            "embedding request failed: Error code: 401 from "
+            f"https://api.proxyapi.ru/v1/embeddings?api_key={secret} body {secret}"
+        )
+
+    monkeypatch.setattr(admin, "embed_live_catalog", rejected)
+    edited = FakeEditable()
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        await admin.on_price_embed(FakeQuery("pe|1", FakeBot(), edited), FakeBot())
+    text = edited.edits[-1][0]
+    assert text.startswith("Провайдер эмбеддингов отклонил запрос.")
+    assert "401" in text
+    assert "api_key=" not in text
+    assert secret not in text
+    assert secret not in caplog.text
+    assert "Traceback" not in caplog.text
 
 
 def test_embed_helpers_do_not_call_the_provider(monkeypatch):

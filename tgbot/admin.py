@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import secrets
 from datetime import datetime, timezone
 from html import escape
@@ -35,6 +36,7 @@ from matching.catalog import (
     price_list_destination,
     replace_price_file,
 )
+from matching.errors import PipelineError
 from misc.admins import get_admin_ids, parse_id_and_reason
 from tgbot.dialogs import interrupt_dialog
 from tgbot.ui.callbacks import (
@@ -490,6 +492,38 @@ def count_missing_catalog_names() -> int:
     return len(Embedder().missing(names))
 
 
+def _scrub_embed_detail(text: str) -> str:
+    """Drop the API key and URL query strings. The embeddings layer already redacts the key."""
+    from matching import config
+
+    cleaned = text.replace("\r", " ").replace("\n", " ")
+    key = (config.OPENAI_API_KEY or "").strip()
+    if key:
+        cleaned = cleaned.replace(key, "***")
+    cleaned = re.sub(r"(https?://[^\s'\"<>]+)\?[^\s'\"<>]*", r"\1", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def embed_failure_notice(exc: BaseException) -> str:
+    """Short Russian reason for the owner. The log line is the sanitized PipelineError text."""
+    if not isinstance(exc, PipelineError):
+        logging.warning("price embed failed: %s", type(exc).__name__)
+        return "Не удалось посчитать эмбеддинги."
+    detail = _scrub_embed_detail(str(exc))
+    logging.warning("price embed failed: %s", detail or type(exc).__name__)
+    if "OPENAI_API_KEY is missing" in detail:
+        return "Не задан ключ OPENAI_API_KEY. Эмбеддинги не посчитаны."
+    prefix = "embedding request failed:"
+    if detail.startswith(prefix):
+        fragment = detail[len(prefix) :].strip()[:180]
+        if fragment:
+            return f"Провайдер эмбеддингов отклонил запрос. {escape(fragment)}"
+        return "Провайдер эмбеддингов отклонил запрос."
+    if detail:
+        return f"Не удалось посчитать эмбеддинги. {escape(detail[:180])}"
+    return "Не удалось посчитать эмбеддинги."
+
+
 def embed_live_catalog() -> int:
     """Embed live catalog names that are not cached. Returns how many new texts were stored."""
     from matching.embeddings import Embedder, embed_catalog
@@ -731,8 +765,7 @@ async def on_price_embed(query: CallbackQuery, bot: Bot) -> None:
         async with catalog_embed_lock:
             added = await asyncio.to_thread(embed_live_catalog)
     except Exception as exc:
-        logging.warning("price embed failed: %s", type(exc).__name__)
-        await _edit_query(query, bot, "Не удалось посчитать эмбеддинги.")
+        await _edit_query(query, bot, embed_failure_notice(exc))
         return
     finally:
         await _release_embed()
